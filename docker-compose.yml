@@ -1,0 +1,37 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: taskflow
+      POSTGRES_PASSWORD: taskflow
+      POSTGRES_DB: taskflow
+    ports: ["5432:5432"]
+    volumes: [pgdata:/var/lib/postgresql/data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U taskflow"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  redis:
+    image: redis:7-alpine
+    ports: ["6379:6379"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  app:
+    build: .
+    profiles: ["app"]
+    environment:
+      DATABASE_URL: postgres://taskflow:taskflow@db:5432/taskflow
+      REDIS_URL: redis://redis:6379
+    ports: ["3000:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+      redis: { condition: service_healthy }
+
+volumes:
+  pgdata:
