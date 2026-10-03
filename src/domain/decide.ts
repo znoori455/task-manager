@@ -22,7 +22,7 @@ export interface DecideContext {
   /** Every task the command references, plus those tasks' dependencies. */
   tasks: Record<string, Task | undefined>;
   /** Comments referenced by the command (only needed for comment.delete). */
-  comments?: Record<string, Comment | undefined>;
+  commentsById?: Record<string, Comment | undefined>;
   /** Dependency subgraph for cycle checks; derived from `tasks` when omitted. */
   graph?: DependencyGraph;
 }
@@ -156,7 +156,7 @@ export function decide(ctx: DecideContext, cmd: Command, meta: DecideMeta): Even
     }
 
     case "comment.delete": {
-      const comment = ctx.comments?.[cmd.commentId];
+      const comment = ctx.commentsById?.[cmd.commentId];
       if (!comment || comment.taskId !== cmd.taskId) throw new DomainError("not_found", "Comment not found");
       if (comment.author !== meta.actor) throw new DomainError("forbidden", "You can only delete your own comments");
       return [{ type: "comment.deleted", payload: { taskId: cmd.taskId, commentId: cmd.commentId } }];

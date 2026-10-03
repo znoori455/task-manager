@@ -104,7 +104,7 @@ async function loadContext(tx: Tx, project: Project, cmd: Command): Promise<Deci
 
   if (cmd.type === "comment.delete") {
     const [c] = await tx.select().from(comments).where(eq(comments.id, cmd.commentId));
-    if (c) ctx.comments = { [c.id]: toComment(c) };
+    if (c) ctx.commentsById = { [c.id]: toComment(c) };
   }
   return ctx;
 }

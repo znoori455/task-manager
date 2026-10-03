@@ -273,9 +273,9 @@ export function dispatch(command: Command, opts: { history?: "record" | "skip" }
   const now = new Date().toISOString();
   let bodies;
   try {
-    const comments: Record<string, Comment> = {};
-    if (command.type === "comment.delete") for (const c of view.comments[command.taskId] ?? []) comments[c.id] = c;
-    bodies = decide({ project: view.project, tasks: view.tasks, comments }, command, { actor: me, now });
+    const commentsById: Record<string, Comment> = {};
+    if (command.type === "comment.delete") for (const c of view.comments[command.taskId] ?? []) commentsById[c.id] = c;
+    bodies = decide({ project: view.project, tasks: view.tasks, commentsById }, command, { actor: me, now });
   } catch (e) {
     if (e instanceof DomainError) toast("error", e.message);
     else throw e;

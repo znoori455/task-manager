@@ -24,7 +24,6 @@ services:
 
   app:
     build: .
-    profiles: ["app"]
     environment:
       DATABASE_URL: postgres://taskflow:taskflow@db:5432/taskflow
       REDIS_URL: redis://redis:6379
