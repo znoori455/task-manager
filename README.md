@@ -322,17 +322,27 @@ Playwright e2e, and a Docker image build.
 
 ## Project layout
 
-```
-src/
-  domain/        pure domain model: types, rules (workflow, graph), decide, apply, undo
-  contract/      zod request schemas, response types, OpenAPI generator
-  server/        db (schema, client, mappers), commands (write path), queries,
-                 sse (ordered fan-out + backpressure), redis (pub/sub, cache, presence, rate limit)
-  client/        typed API client, sync engine store (optimistic, rebase, undo, presence)
-  components/    list (virtualized), board (virtualized, drag & drop), task panel, activity feed
-  app/           pages + API route handlers
-drizzle/         SQL migrations
-scripts/         migrate, seed
-tests/           unit/, integration/, e2e/
-load/            k6 + SSE fan-out scripts and RESULTS.md
-```
+Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `client/store.ts`.
+
+| Path | What it is |
+| --- | --- |
+| `src/domain/` | Business logic, with no I/O; both server and client run it. |
+| ├─ `types.ts`, `events.ts` | The data model (Project, Task, Comment) and every event type |
+| ├─ `rules.ts` | Status workflow, "blocked" rule, dependency cycle detection |
+| ├─ `decide.ts` | Command → events, or a `DomainError` when a rule is broken |
+| ├─ `apply.ts` | The only reducer: applies events to state |
+| └─ `undo.ts` | Computes the inverse command for undo/redo |
+| `src/contract/` | The API contract: `schemas.ts` (zod request validation), `api.ts` (response types per route), `openapi.ts` (generated docs) |
+| `src/server/` | Backend code, called by the route handlers. |
+| ├─ `commands.ts` | **The write path:** lock → validate → persist → append event → publish |
+| ├─ `sse.ts` | Event streams: ordered, gap-free delivery, replay, backpressure |
+| ├─ `redis.ts` | Pub/sub fan-out, recent-events cache, presence, rate limiter |
+| ├─ `queries.ts` | Read endpoints (paginated tasks, comments, activity) |
+| └─ `db/schema.ts` | Tables and indexes (Drizzle); migrations are generated from this |
+| `src/client/store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection |
+| `src/app/api/` | Thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint |
+| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments) |
+| `drizzle/` | Generated SQL migrations (don't edit; run `npm run db:generate`) |
+| `scripts/` | `migrate.ts`, `seed.ts` |
+| `tests/` | `unit/` (domain), `integration/` (write path on real Postgres/Redis), `e2e/` (two-browser Playwright) |
+| `load/` | Load-test scripts (k6 and SSE fan-out) and `RESULTS.md` |
