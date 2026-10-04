@@ -11,23 +11,30 @@ export function EditableText({
   className = "input w-full",
   multiline,
   placeholder,
+  onEditing,
 }: {
   value: string;
   onCommit: (v: string) => void;
   className?: string;
   multiline?: boolean;
   placeholder?: string;
+  /** Called on focus/blur, e.g. to show others "bob is editing…". */
+  onEditing?: (editing: boolean) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
   const commit = () => {
     if (draft !== null && draft !== value) onCommit(draft);
     setDraft(null);
+    onEditing?.(false);
   };
   const props = {
     className,
     placeholder,
     value: draft ?? value,
-    onFocus: () => setDraft(value),
+    onFocus: () => {
+      setDraft(value);
+      onEditing?.(true);
+    },
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.target.value),
     onBlur: commit,
     onKeyDown: (e: React.KeyboardEvent) => {

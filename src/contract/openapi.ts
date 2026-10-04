@@ -1,7 +1,7 @@
 // OpenAPI 3.1 document generated from the same zod schemas the server uses to
 // validate requests, so the docs can't drift from the implementation.
 import { z } from "zod";
-import { commandRequestSchema, createProjectSchema, customFieldValue, presenceSchema, prioritySchema, sessionSchema, statusSchema } from "./schemas";
+import { commandRequestSchema, createProjectSchema, customFieldValue, markReadSchema, prioritySchema, sessionSchema, statusSchema } from "./schemas";
 
 const project = z.object({
   id: z.string(),
@@ -168,7 +168,7 @@ export function openApiDocument() {
         get: {
           summary: "SSE: live events for a project",
           description:
-            "Default `message` events carry one Event each, with `id: <seq>`. Resumes after the `Last-Event-ID` header or `?since=`. Other event types: `ready`, `presence`, `resync` (too far behind; reload).",
+            "Default `message` events carry one Event each, with `id: <seq>`. Resumes after the `Last-Event-ID` header or `?since=`. Other event types: `ready`, `resync` (too far behind; catch up via /changes). Presence, cursors and typing are on the WebSocket service (`realtime/`), not here.",
           parameters: [{ name: "since", in: "query", schema: { type: "integer" } }],
           responses: { 200: { description: "text/event-stream" } },
         },
@@ -188,9 +188,23 @@ export function openApiDocument() {
         parameters: [idParam, { name: "taskId", in: "path", required: true, schema: { type: "string" } }],
         get: { summary: "Comment thread for a task", responses: { 200: ok({ type: "object", properties: { comments: { type: "array", items: ref("Comment") } } }) } },
       },
-      "/api/projects/{id}/presence": {
-        parameters: [idParam],
-        post: { summary: "Presence heartbeat", requestBody: json(toSchema(presenceSchema)), responses: { 200: ok({ type: "object" }), ...errors } },
+      "/api/notifications": {
+        get: {
+          summary: "Your notifications, newest first, plus the unread count",
+          description: "Created in the same transaction as the change that caused them (mentions, assignments, comments and status changes on tasks assigned to you). Pushed live over the WebSocket service.",
+          parameters: [
+            { name: "before", in: "query", schema: { type: "string" }, description: "createdAt of the last item from the previous page" },
+            { name: "limit", in: "query", schema: { type: "integer", default: 30, maximum: 100 } },
+          ],
+          responses: { 200: ok({ type: "object", properties: { notifications: { type: "array", items: { type: "object" } }, unread: { type: "integer" } } }), ...errors },
+        },
+      },
+      "/api/notifications/read": {
+        post: {
+          summary: "Mark notifications read (all of them when `ids` is omitted)",
+          requestBody: json(toSchema(markReadSchema)),
+          responses: { 200: ok({ type: "object", properties: { unread: { type: "integer" } } }), ...errors },
+        },
       },
     },
     components: { schemas: Object.fromEntries(Object.entries(schemas).map(([k, v]) => [k, toSchema(v)])) },

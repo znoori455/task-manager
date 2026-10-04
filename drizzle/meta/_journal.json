@@ -29,6 +29,13 @@
       "when": 1791154653783,
       "tag": "0003_feed_index_order",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1791157212162,
+      "tag": "0004_notifications",
+      "breakpoints": true
     }
   ]
 }

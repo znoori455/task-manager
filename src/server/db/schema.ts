@@ -90,3 +90,29 @@ export const events = pgTable(
     index("events_project_mutation_idx").on(t.projectId, t.clientMutationId),
   ],
 );
+
+// Per-user notifications, written in the same transaction as the command that
+// caused them (so they can't be lost or duplicated) and pushed live via Redis.
+export const notifications = pgTable(
+  "notifications",
+  {
+    id: text("id").primaryKey(),
+    /** Lowercased display name. */
+    recipient: text("recipient").notNull(),
+    projectId: text("project_id")
+      .notNull()
+      .references(() => projects.id, { onDelete: "cascade" }),
+    taskId: text("task_id"),
+    type: text("type").notNull(),
+    actor: text("actor").notNull(),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull(),
+    createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull(),
+    readAt: timestamp("read_at", { withTimezone: true, mode: "string" }),
+  },
+  (t) => [
+    // A user's list, newest first (backward scan; see tasks_project_updated_idx).
+    index("notifications_recipient_created_idx").on(t.recipient, t.createdAt),
+    // Unread count.
+    index("notifications_unread_idx").on(t.recipient).where(sql`${t.readAt} IS NULL`),
+  ],
+);

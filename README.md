@@ -7,9 +7,12 @@ per-project log. Clients receive those events (not projects) over
 client ends up in the same state. Tasks and projects load as infinite-scroll
 feeds sorted by last updated, and are cached in IndexedDB, so the app keeps
 working offline and catches up from a Redis change index when it reconnects.
+A small TypeScript **WebSocket service** adds live collaboration: presence,
+cursors pinned to tasks, shared selection, typing indicators and instant
+notifications.
 
 ```bash
-docker compose up --build          # app on http://localhost:3000 (runs migrations on start)
+docker compose up --build          # app on :3000 (runs migrations on start), WebSocket service on :3001
 docker compose exec app npm run db:seed   # optional: demo project + a 10,000-task project
 ```
 
@@ -76,10 +79,11 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
   - GitHub Actions CI,
   - OpenAPI/Swagger,
   - Drizzle migrations and a seed script.
-- **Option 2, partly:**
-  - presence (who's in the project and which task they have open),
-  - a live activity feed,
-  - @mentions with notifications.
+- **Option 2, Advanced collaboration:**
+  - presence: who's in each project (shown on the project list too) and which task they have open. It's tied to the WebSocket connection, so joins and leaves show instantly,
+  - live cursors pinned to tasks, plus shared selection: a colored outline on the task someone has open, "bob is editing…" on fields, "bob is typing…" in comments,
+  - a live activity feed, plus notifications: a bell with unread count across all projects, delivered instantly,
+  - @mentions with notifications, detected on the server and saved, so you see them even if you were offline. Assignment, comments and status changes on your tasks notify you too.
 - **Option 4, partly:**
   - a Kanban board with drag and drop. Dropping a card is validated as a status transition.
   - offline support: tasks, projects and unsent edits are kept in IndexedDB, and a service worker caches the app shell so the app opens without a network. Edits made offline sync on reconnect, and conflicting ones are rolled back with a message ([how](#offline-and-catch-up)).
@@ -103,7 +107,19 @@ flowchart LR
   R -- "SUBSCRIBE (one per project per instance)" --> SSE
   SSE -- "event stream, id = seq" --> Store
   SSE -. "replay: Redis recent-events cache,<br/>else Postgres" .-> PG
+  UI <-- "WebSocket: presence, cursors,<br/>selection, typing, notifications" --> RT["Realtime service<br/>(realtime/, N instances)"]
+  RT <-- "pub/sub + presence hashes" --> R
+  API -- "after commit:<br/>PUBLISH notify:user" --> R
 ```
+
+There are two real-time channels, each with a clear job:
+
+| | SSE (Next.js) | WebSocket (`realtime/`) |
+| --- | --- | --- |
+| Carries | Durable changes: the event log | Short-lived signals: presence, cursors, selection, typing. Also forwards notifications |
+| Delivery | Ordered, gap-free, resumable (`Last-Event-ID`) | Latest-wins. Losing a cursor frame doesn't matter |
+| Direction | Server → client (writes are POST commands) | Both ways, high frequency (cursors ~20/s per user) |
+| State | Postgres (source of truth) + Redis cache | Redis only. Nothing in it needs to survive |
 
 The shared domain layer in `src/domain/` is what makes the design hold
 together:
@@ -198,9 +214,51 @@ view = applyEvents(confirmed, pending.events with provisional seqs)
 - If a change was accepted but hasn't come back over SSE within 5 s, the client
   reconnects to force a replay. This covers a missed Redis publish.
 
-**Presence** is a Redis hash per project with a 30 s TTL. Clients send a
-heartbeat every 10 s and whenever they open a task, and the server pushes the
-list on the same SSE stream.
+### Live collaboration (WebSocket service)
+
+`realtime/server.ts` is a small Node service using the `ws` package. It never
+touches Postgres. Next.js route handlers can't hold WebSocket connections, so it
+runs alongside the app; it's TypeScript so it shares the message contract
+(`src/contract/realtime.ts`, zod) with the browser.
+
+- **Rooms:** one per project, plus a lobby for the project list. The same
+  `tf_user` cookie identifies the user, and the `Origin` header is checked
+  (cookie auth would otherwise let other sites connect as the user).
+- **Presence:** a Redis hash per project (connection → name, open task, field
+  being edited), published to every instance on each change.
+  - Tied to the connection, so leaving shows instantly.
+  - Instances refresh their entries every 10 s, so a crashed instance's users
+    disappear within 30 s.
+  - The lobby gets "who's in which project" updates.
+- **Cursors pinned to tasks:** the browser sends the pointer as a fraction of
+  the hovered task's row or card (`{taskId, x, y}`). It lands on the same task
+  for everyone, whatever their screen size or scroll position, and is hidden
+  when that task isn't on screen.
+  - The browser throttles to 20 updates/s.
+  - Each instance keeps only the newest position per connection and sends a
+    batch every ~66 ms (latest wins).
+- **Backpressure:** cursor frames are skipped for a client with a backlog. A
+  client far behind is disconnected; it reconnects and gets a fresh snapshot.
+  Each connection is rate limited (token bucket, 60 msg/s), and floods are
+  closed with code 1008.
+- **Scaling:** no sticky sessions needed. Every instance subscribes to Redis
+  channels only for rooms its own connections are in.
+
+### Notifications
+
+- **Generated inside the write transaction** from the same before/after state
+  the command produced (`src/domain/notifications.ts`, pure and unit-tested). A
+  notification exists if and only if its change committed:
+  - **mention:** someone @mentioned you in a comment (parsed on the server);
+  - **assigned:** you were assigned a task;
+  - **comment / status:** activity on a task assigned to you.
+  - Nobody is notified about their own actions.
+- **Delivered live:** after commit, published to `notify:<user>`. The realtime
+  service forwards it to every open tab of that user, which shows a toast and
+  updates the bell.
+- **Never lost:** the list and unread count come from Postgres
+  (`GET /api/notifications`), and the browser refetches after every reconnect.
+  Live delivery is a speed-up, not the source of truth.
 
 ### Offline and catch-up
 
@@ -282,7 +340,9 @@ What's built (one region, N stateless app instances) and the next steps:
    out across instances, and each instance has one Redis subscription per
    active project shared by its SSE connections. SSE connections are long-lived
    HTTP requests, so the load balancer needs idle timeouts above 15 s
-   (heartbeats are every 15 s).
+   (heartbeats are every 15 s). The WebSocket service scales the same way and
+   independently of the API: add instances behind a load balancer, with no
+   sticky sessions, since rooms and presence live in Redis.
 2. **Reads.** Send task pages, comment threads and replays to Postgres read
    replicas. Replays are already mostly served from Redis.
 3. **Large projects.**
@@ -308,12 +368,26 @@ What's built (one region, N stateless app instances) and the next steps:
 
 ## Tradeoffs
 
-- **SSE + POST instead of WebSockets.**
-  - Works in plain App Router route handlers with no custom server, and gets
-    reconnect and `Last-Event-ID` resume for free.
-  - Downside: client→server traffic is separate HTTP requests. That's fine for
-    commands and presence heartbeats, but too slow for live cursors or
-    keystroke-level shared editing, which would need WebSockets.
+- **SSE for changes, WebSockets only for short-lived signals.**
+  - Changes stay on SSE: it works in plain App Router route handlers, and
+    resume with `Last-Event-ID` gives ordered, gap-free delivery that's already
+    tested. Cursors and typing need high-frequency two-way traffic, which is
+    what WebSockets are for.
+  - Cost: two connections per tab, and two channels to explain. Each has one
+    clear job (see [Architecture](#architecture)).
+- **A separate TypeScript WebSocket service, rather than Go or a custom Next.js server.**
+  - The brief prefers "Next.js API routes OR Go services". Next.js route
+    handlers can't hold WebSocket connections (the Next.js docs say so), so
+    something has to run next to them.
+  - A custom Next.js server would mix WebSocket load into the same process as
+    pages and API calls.
+  - A Go service would mean a second toolchain, and keeping the message types
+    in sync between two languages.
+  - A ~300-line Node service shares the zod contract and the toolchain, never
+    touches business rules or the database, and scales on its own.
+- **Identity is a display name, so are mentions.** `@name` works for names made
+  of letters, digits, `_`, `.` or `-`, matched case-insensitively. A real user
+  directory would add autocomplete and stable user ids.
 - **Server-ordered log instead of a full CRDT.**
   - Easier to reason about, makes business rules enforceable (cycles,
     workflow), and gives every client the same history.
@@ -353,7 +427,8 @@ What's built (one region, N stateless app instances) and the next steps:
 | --- | --- |
 | **Next.js 16 App Router** (route handlers) | Preferred stack. One TypeScript codebase, so the domain logic and the contract are shared, not duplicated |
 | **Postgres** | Transactions, row locks for sequencing, recursive CTEs for graph checks, partial and GIN indexes. The event log and the tables share one transaction |
-| **Redis** | Pub/sub across instances, recent-events cache, sorted-set change indexes for catch-up, atomic token bucket in Lua, presence with TTL |
+| **Redis** | Pub/sub across instances (events, notifications, realtime rooms), recent-events cache, sorted-set change indexes for catch-up, atomic token bucket in Lua, presence hashes |
+| **`ws`** (Node WebSocket server) | The realtime service. Small, no framework, shares types and tooling with the app |
 | **SSE** | Server→client push that works through proxies and HTTP/2, with automatic resume built in |
 | **Drizzle ORM** | Typed schema, SQL-first queries, generated SQL migrations committed to the repo |
 | **zod** | One schema per request type → runtime validation, TS types and OpenAPI |
@@ -377,12 +452,13 @@ npm install
 npm run db:migrate
 npm run db:seed        # optional
 npm run dev            # http://localhost:3000
+npm run realtime       # WebSocket service on :3001 (separate terminal)
 ```
 
 | Command | |
 | --- | --- |
 | `npm test` | Unit tests (domain) + integration tests (needs db/redis running) |
-| `npm run test:e2e` | Playwright: two browsers collaborating, offline edits (starts a dev server on :3100; use `E2E_PORT=3000` to reuse a running one). With `CI=1` it runs against `next start` and includes the offline-reload test |
+| `npm run test:e2e` | Playwright: two browsers collaborating (sync, cursors, presence, typing, notifications), offline edits. Starts a dev server on :3100 and the realtime service on :3001; use `E2E_PORT=3000` to reuse a running app. With `CI=1` it runs against `next start` and includes the offline-reload test |
 | `npm run typecheck` / `npm run lint` | |
 | `npm run db:generate` | New migration from `src/server/db/schema.ts` |
 | `npx tsx load/fanout.ts <projectId>` | SSE fan-out latency test |
@@ -394,7 +470,7 @@ Playwright e2e, and a Docker image build.
 
 ## Project layout
 
-Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `server/changes.ts` → `client/store.ts` → `client/feeds.ts`.
+Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `server/changes.ts` → `client/store.ts` → `client/feeds.ts` → `realtime/server.ts`.
 
 | Path | What it is |
 | --- | --- |
@@ -403,12 +479,14 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `rules.ts` | Status workflow, "blocked" rule, dependency cycle detection |
 | ├─ `decide.ts` | Command → events, or a `DomainError` when a rule is broken |
 | ├─ `apply.ts` | The only reducer: applies events to state |
-| └─ `undo.ts` | Computes the inverse command for undo/redo |
-| `src/contract/` | The API contract: `schemas.ts` (zod request validation), `api.ts` (response types per route), `filters.ts` (feed filters, applied identically by server and client), `openapi.ts` (generated docs) |
+| ├─ `undo.ts` | Computes the inverse command for undo/redo |
+| └─ `notifications.ts`, `mentions.ts` | Who gets notified about what; @mention parsing |
+| `src/contract/` | The API contract: `schemas.ts` (zod request validation), `api.ts` (response types per route), `filters.ts` (feed filters, applied identically by server and client), `realtime.ts` (WebSocket messages), `openapi.ts` (generated docs) |
 | `src/server/` | Backend code, called by the route handlers. |
 | ├─ `commands.ts` | **The write path:** lock → validate → persist → append event → publish |
 | ├─ `sse.ts` | Event streams: ordered, gap-free delivery, replay, backpressure |
-| ├─ `redis.ts` | Pub/sub fan-out, recent-events cache, presence, rate limiter |
+| ├─ `redis.ts` | Pub/sub fan-out, recent-events cache, rate limiter |
+| ├─ `notifications.ts` | Notification list and mark-as-read queries |
 | ├─ `changes.ts` | Catch-up for returning clients: Redis sorted-set change indexes with a Postgres safety net |
 | ├─ `queries.ts` | Read endpoints (task/project feeds, counts, comments, activity) |
 | └─ `db/schema.ts` | Tables and indexes (Drizzle); migrations are generated from this |
@@ -416,11 +494,14 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection, offline queue, catch-up |
 | ├─ `feeds.ts` | Infinite-scroll feeds (TanStack Query) with frozen order and the "N updated" count |
 | ├─ `cache.ts` | IndexedDB persistence |
-| └─ `projects.ts` | Project list state, lobby stream and catch-up |
+| ├─ `projects.ts` | Project list state, lobby stream and catch-up |
+| ├─ `realtime.ts` | WebSocket connection: presence, cursors, selection, typing; reconnects and rejoins |
+| └─ `notifications.ts` | Notification list, unread count, toasts |
+| `realtime/` | **The WebSocket service** (`server.ts`, `main.ts`): rooms, presence, cursor batching, backpressure, notification forwarding |
 | `src/app/api/` | Thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint |
-| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments) |
-| `drizzle/` | SQL migrations, generated by `npm run db:generate`. Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
+| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments), `Collaboration` (cursors, selection, typing), `NotificationBell` |
+| `drizzle/` | SQL migrations, generated by `npm run db:generate` (0004 adds `notifications`). Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
 | `scripts/` | `migrate.ts`, `seed.ts` |
-| `tests/` | `unit/` (domain), `integration/` (write path and catch-up on real Postgres/Redis), `e2e/` (two-browser collaboration, offline) |
+| `tests/` | `unit/` (domain, notification rules), `integration/` (write path, catch-up, notifications and the WebSocket service on real Postgres/Redis), `e2e/` (two-browser collaboration, live cursors/presence/notifications, offline) |
 | `public/sw.js` | Service worker: caches the app shell for offline starts |
 | `load/` | Load-test scripts (k6 and SSE fan-out) and `RESULTS.md` |

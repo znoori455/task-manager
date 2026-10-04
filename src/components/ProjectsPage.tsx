@@ -4,7 +4,9 @@ import { useEffect, useRef, useState } from "react";
 import { call } from "@/client/api";
 import { useProjectFeed } from "@/client/feeds";
 import { pinProject, startProjects, useProjects } from "@/client/projects";
+import { joinRoom, useRealtime } from "@/client/realtime";
 import { useStore } from "@/client/store";
+import { NotificationBell } from "./NotificationBell";
 import { UpdatesPill } from "./UpdatesPill";
 import { Avatar, timeAgo } from "./ui";
 
@@ -18,7 +20,12 @@ export function ProjectsPage() {
   const [error, setError] = useState<string | null>(null);
   const sentinel = useRef<HTMLDivElement>(null);
 
-  useEffect(() => void startProjects(), []);
+  const lobby = useRealtime((s) => s.lobby);
+
+  useEffect(() => {
+    void startProjects();
+    joinRoom("lobby");
+  }, []);
 
   // Infinite scroll: load the next page when the bottom of the list comes into view.
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = feed;
@@ -38,8 +45,11 @@ export function ProjectsPage() {
           <p className="text-sm text-zinc-500">Real-time collaborative projects</p>
         </div>
         {me && (
-          <div className="flex items-center gap-2 text-sm text-zinc-600">
-            <Avatar name={me} /> {me}
+          <div className="flex items-center gap-3 text-sm text-zinc-600">
+            <NotificationBell />
+            <span className="flex items-center gap-2">
+              <Avatar name={me} /> {me}
+            </span>
           </div>
         )}
       </header>
@@ -102,9 +112,17 @@ export function ProjectsPage() {
                     )}
                   </div>
                   {p.description && <p className="mt-1 line-clamp-2 text-sm text-zinc-500">{p.description}</p>}
-                  <p className="mt-3 text-xs text-zinc-400">
-                    {p.taskCount.toLocaleString()} tasks · updated {timeAgo(p.updatedAt)}
-                  </p>
+                  <div className="mt-3 flex items-center justify-between gap-2">
+                    <p className="text-xs text-zinc-400">
+                      {p.taskCount.toLocaleString()} tasks · updated {timeAgo(p.updatedAt)}
+                    </p>
+                    {/* Who's in this project right now (live, from the realtime service). */}
+                    <span className="flex -space-x-1" data-testid="project-presence">
+                      {(lobby[p.id] ?? []).slice(0, 4).map((name) => (
+                        <Avatar key={name} name={name} size="xs" ring />
+                      ))}
+                    </span>
+                  </div>
                 </li>
               );
             })}

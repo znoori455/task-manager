@@ -78,4 +78,4 @@ export const createProjectSchema = z.object({
 
 export const sessionSchema = z.object({ name });
 
-export const presenceSchema = z.object({ taskId: id.nullable() });
+export const markReadSchema = z.object({ ids: z.array(z.string().min(1).max(64)).max(200).optional() });

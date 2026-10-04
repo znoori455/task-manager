@@ -1,5 +1,6 @@
 // Two users in two isolated browser contexts editing the same project.
 import { expect, test, type Browser, type Page } from "@playwright/test";
+import { setupHeaders } from "./helpers";
 
 async function userPage(browser: Browser, name: string, baseURL: string): Promise<Page> {
   const context = await browser.newContext();
@@ -8,7 +9,7 @@ async function userPage(browser: Browser, name: string, baseURL: string): Promis
 }
 
 test("changes sync between clients in real time", async ({ browser, baseURL, request }) => {
-  const res = await request.post("/api/projects", { data: { name: `e2e ${Date.now()}` }, headers: { cookie: "tf_user=setup" } });
+  const res = await request.post("/api/projects", { data: { name: `e2e ${Date.now()}` }, headers: setupHeaders() });
   const { project } = await res.json();
 
   const alice = await userPage(browser, "alice", baseURL!);
@@ -45,7 +46,7 @@ test("changes sync between clients in real time", async ({ browser, baseURL, req
 });
 
 test("invalid transitions are rejected and rolled back", async ({ browser, baseURL, request }) => {
-  const headers = { cookie: "tf_user=setup" };
+  const headers = setupHeaders();
   const { project } = await (await request.post("/api/projects", { data: { name: `e2e-rules ${Date.now()}` }, headers })).json();
   const cmd = (clientMutationId: string, command: object) => request.post(`/api/projects/${project.id}/commands`, { data: { clientMutationId, command }, headers });
   await cmd("a", { type: "task.create", task: { id: `${project.id}-dep`, title: "Dependency" } });

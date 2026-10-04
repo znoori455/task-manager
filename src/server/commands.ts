@@ -7,7 +7,10 @@
 //   -> append events to the log
 //   COMMIT -> publish events to Redis -> SSE fan-out
 import { and, asc, eq, getTableColumns, gt, inArray, sql } from "drizzle-orm";
+import { nanoid } from "nanoid";
+import type { NotificationView } from "@/contract/realtime";
 import type { CommandRequest, Command } from "@/contract/schemas";
+import { notificationsFor } from "@/domain/notifications";
 import { applyEvents, type ProjectState } from "@/domain/apply";
 import { decide, DomainError, type DecideContext } from "@/domain/decide";
 import type { DomainEvent, EventBody } from "@/domain/events";
@@ -17,7 +20,7 @@ import { fromTask, toComment, toProject, toTask } from "./db/mappers";
 import { indexProjectCreated, indexWrite } from "./changes";
 import { cacheEvents, channels, publish, redis } from "./redis";
 
-const { projects, tasks, comments, events } = tables;
+const { projects, tasks, comments, events, notifications } = tables;
 
 const LOBBY_THROTTLE_MS = 3000;
 
@@ -40,12 +43,12 @@ export async function executeCommand(projectId: string, req: CommandRequest, act
       .from(events)
       .where(and(eq(events.projectId, projectId), eq(events.clientMutationId, req.clientMutationId)))
       .orderBy(asc(events.seq));
-    if (prior.length) return { events: prior.map(toEvent), version: project.version, fresh: false };
+    if (prior.length) return { events: prior.map(toEvent), version: project.version, fresh: false, notifications: [] };
 
     const ctx = await loadContext(tx, project, req.command);
     const now = new Date().toISOString();
     const bodies = decide(ctx, req.command, { actor, now });
-    if (!bodies.length) return { events: [], version: project.version, fresh: false };
+    if (!bodies.length) return { events: [], version: project.version, fresh: false, notifications: [] };
 
     const newEvents: DomainEvent[] = bodies.map((body, i) => ({
       ...body,
@@ -56,11 +59,11 @@ export async function executeCommand(projectId: string, req: CommandRequest, act
       timestamp: now,
     }));
 
-    await persist(tx, ctx, newEvents);
-    return { events: newEvents, version: project.version + newEvents.length, fresh: true };
+    const notified = await persist(tx, ctx, newEvents);
+    return { events: newEvents, version: project.version + newEvents.length, fresh: true, notifications: notified };
   });
 
-  if (result.fresh) await broadcast(projectId, result.events);
+  if (result.fresh) await broadcast(projectId, result.events, result.notifications);
   return { events: result.events, version: result.version };
 }
 
@@ -135,7 +138,9 @@ async function reachableSubgraph(tx: Tx, projectId: string, starts: string[]) {
   return Object.fromEntries(rows.map((r) => [r.id, r.dependencies]));
 }
 
-async function persist(tx: Tx, ctx: DecideContext, newEvents: DomainEvent[]) {
+type NotificationRow = NotificationView & { recipient: string };
+
+async function persist(tx: Tx, ctx: DecideContext, newEvents: DomainEvent[]): Promise<NotificationRow[]> {
   const before: ProjectState = {
     project: ctx.project,
     tasks: Object.fromEntries(Object.entries(ctx.tasks).filter((e): e is [string, Task] => !!e[1])),
@@ -181,10 +186,27 @@ async function persist(tx: Tx, ctx: DecideContext, newEvents: DomainEvent[]) {
       timestamp: e.timestamp,
     })),
   );
+
+  // Notifications commit with the change that caused them.
+  const created: NotificationRow[] = notificationsFor(newEvents, before, after).map((d) => ({
+    id: nanoid(14),
+    type: d.type,
+    projectId: ctx.project.id,
+    taskId: d.taskId,
+    actor: d.actor,
+    data: { projectName: after.project.name, ...d.data },
+    createdAt: updatedAt,
+    readAt: null,
+    recipient: d.recipient,
+  }));
+  if (created.length) await tx.insert(notifications).values(created);
+  return created;
 }
 
-async function broadcast(projectId: string, newEvents: DomainEvent[]) {
+async function broadcast(projectId: string, newEvents: DomainEvent[], notified: NotificationRow[]) {
   try {
+    // Live delivery via the realtime service; the list is always refetchable from Postgres.
+    for (const { recipient, ...n } of notified) await publish(channels.notify(recipient), n);
     for (const event of newEvents) await publish(channels.project(projectId), { kind: "event", event });
     await cacheEvents(projectId, newEvents);
     // Every write moves the project up the "last updated" list. Tell the lobby,

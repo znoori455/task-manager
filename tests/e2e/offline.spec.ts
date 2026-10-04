@@ -1,6 +1,7 @@
 // Offline support: edits made offline are kept, survive a reload, and sync on
 // reconnect; changes others made meanwhile are caught up via /changes.
 import { expect, test, type Browser, type BrowserContext, type Page } from "@playwright/test";
+import { setupHeaders } from "./helpers";
 
 async function userContext(browser: Browser, name: string, baseURL: string): Promise<[BrowserContext, Page]> {
   const context = await browser.newContext();
@@ -9,7 +10,7 @@ async function userContext(browser: Browser, name: string, baseURL: string): Pro
 }
 
 test("offline edits sync on reconnect, and missed remote changes are caught up", async ({ browser, baseURL, request }) => {
-  const headers = { cookie: "tf_user=setup" };
+  const headers = setupHeaders();
   const { project } = await (await request.post("/api/projects", { data: { name: `e2e-offline ${Date.now()}` }, headers })).json();
   const cmd = (id: string, command: object) => request.post(`/api/projects/${project.id}/commands`, { data: { clientMutationId: id, command }, headers });
   await cmd("seed-1", { type: "task.create", task: { id: `${project.id}-a`, title: "Write docs" } });
@@ -46,7 +47,7 @@ test("offline edits sync on reconnect, and missed remote changes are caught up",
 });
 
 test("conflicting offline edits are rolled back on reconnect", async ({ browser, baseURL, request }) => {
-  const headers = { cookie: "tf_user=setup" };
+  const headers = setupHeaders();
   const { project } = await (await request.post("/api/projects", { data: { name: `e2e-conflict ${Date.now()}` }, headers })).json();
   const cmd = (id: string, command: object) => request.post(`/api/projects/${project.id}/commands`, { data: { clientMutationId: id, command }, headers });
   await cmd("seed-1", { type: "task.create", task: { id: `${project.id}-a`, title: "Doomed task" } });
@@ -68,7 +69,7 @@ test("conflicting offline edits are rolled back on reconnect", async ({ browser,
 
 test("a reload while offline opens the saved copy (production build only: needs the service worker)", async ({ browser, baseURL, request }) => {
   test.skip(!process.env.CI, "service worker is only registered in production builds");
-  const headers = { cookie: "tf_user=setup" };
+  const headers = setupHeaders();
   const { project } = await (await request.post("/api/projects", { data: { name: `e2e-reload ${Date.now()}` }, headers })).json();
   await request.post(`/api/projects/${project.id}/commands`, {
     data: { clientMutationId: "seed", command: { type: "task.create", task: { id: `${project.id}-a`, title: "Cached task" } } },

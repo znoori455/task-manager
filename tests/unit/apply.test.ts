@@ -3,7 +3,7 @@ import { applyEvents } from "@/domain/apply";
 import { decide } from "@/domain/decide";
 import { invert } from "@/domain/undo";
 import type { Command } from "@/contract/schemas";
-import { mentions } from "@/client/store";
+import { extractMentions, mentions } from "@/domain/mentions";
 import { ev, state, task } from "./fixtures";
 
 describe("applyEvents", () => {
@@ -82,5 +82,8 @@ describe("mentions", () => {
     expect(mentions("@alice", "alice")).toBe(true);
     expect(mentions("@alicea", "alice")).toBe(false);
     expect(mentions("email@alice.com", "alice")).toBe(false);
+  });
+  it("extracts lowercased, de-duplicated names and ignores trailing punctuation", () => {
+    expect(extractMentions("thanks @Bob. cc @carol-x and @bob")).toEqual(["bob", "carol-x"]);
   });
 });

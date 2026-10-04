@@ -23,7 +23,6 @@
 //                    the server re-validates them, conflicts roll back
 import { nanoid } from "nanoid";
 import { create } from "zustand";
-import type { PresenceUser } from "@/contract/api";
 import type { Command } from "@/contract/schemas";
 import { applyEvents, type ProjectState } from "@/domain/apply";
 import { decide, DomainError } from "@/domain/decide";
@@ -31,6 +30,7 @@ import type { DomainEvent } from "@/domain/events";
 import type { Comment, Task } from "@/domain/types";
 import { invert } from "@/domain/undo";
 import { ApiError, call } from "./api";
+import { sendSelect } from "./realtime";
 import { deleteProjectCache, loadProjectCache, saveProjectCache, type CachedPending } from "./cache";
 
 type Pending = CachedPending;
@@ -54,7 +54,6 @@ interface StoreState {
   view: ProjectState | null;
   pending: Pending[];
   connection: Connection;
-  presence: PresenceUser[];
   /** Recent events, newest first, for the activity feed. */
   activity: DomainEvent[];
   undoStack: Command[];
@@ -77,7 +76,6 @@ const initial: Omit<StoreState, "me" | "online"> = {
   view: null,
   pending: [],
   connection: "connecting",
-  presence: [],
   activity: [],
   undoStack: [],
   redoStack: [],
@@ -105,7 +103,6 @@ let incoming: DomainEvent[] = [];
 let flushScheduled = false;
 let sending = false;
 let session = 0;
-let presenceTimer: ReturnType<typeof setInterval> | undefined;
 let ackWatchdog: ReturnType<typeof setTimeout> | undefined;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 const deletedComments = new Set<string>();
@@ -230,7 +227,6 @@ async function catchUp(my: number) {
     recompute();
     scheduleSave();
     connect(projectId, get().confirmed!.project.version);
-    startPresence();
     void loadActivity();
     void pump();
   } catch (e) {
@@ -325,7 +321,6 @@ export function closeProject() {
   if (saveTimer) save();
   es?.close();
   es = null;
-  if (presenceTimer) clearInterval(presenceTimer);
   if (ackWatchdog) clearTimeout(ackWatchdog);
   if (fetchTimer) clearTimeout(fetchTimer);
   fetchTimer = undefined;
@@ -344,7 +339,6 @@ function connect(projectId: string, since: number) {
   source.addEventListener("ready", () => set({ connection: "live" }));
   source.onerror = () => set({ connection: isOnline() ? "reconnecting" : "offline" });
   source.onmessage = (msg) => receive(JSON.parse(msg.data) as DomainEvent);
-  source.addEventListener("presence", (msg) => set({ presence: JSON.parse((msg as MessageEvent).data) }));
   source.addEventListener("resync", () => {
     // Too far behind to replay the log: catch up with changed rows instead.
     source.close();
@@ -376,7 +370,7 @@ function taskIdOf(e: DomainEvent): string | null {
 
 function flushIncoming() {
   flushScheduled = false;
-  const { confirmed, me } = get();
+  const { confirmed } = get();
   if (!confirmed) return;
   const fresh = incoming.filter((e) => e.seq > confirmed.project.version);
   incoming = [];
@@ -393,9 +387,6 @@ function flushIncoming() {
     }
     if (taskId && !(e.clientMutationId && mine.has(e.clientMutationId))) touched[taskId] = e.seq;
     if (e.type === "comment.deleted") deletedComments.add(e.payload.commentId);
-    if (e.type === "comment.added" && me && e.actor !== me && mentions(e.payload.comment.content, me)) {
-      toast("mention", `${e.actor} mentioned you: “${e.payload.comment.content.slice(0, 80)}”`);
-    }
   }
 
   const next = applyEvents(confirmed, fresh);
@@ -410,11 +401,6 @@ function flushIncoming() {
   recompute();
   scheduleSave();
   if (missing.length) ensureTasks(missing);
-}
-
-export function mentions(content: string, name: string) {
-  const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return new RegExp(`(^|\\s)@${escaped}(?![\\w-])`, "i").test(content);
 }
 
 async function loadActivity() {
@@ -567,7 +553,7 @@ export function redo() {
   if (dispatch(cmd, { history: "skip" }) && back) set((s) => ({ undoStack: [...s.undoStack, back] }));
 }
 
-// ---------- selection & presence ----------
+// ---------- selection ----------
 
 export function selectTask(taskId: string | null) {
   set({ selectedTaskId: taskId });
@@ -575,17 +561,6 @@ export function selectTask(taskId: string | null) {
     ensureTasks([taskId]);
     void loadComments(taskId).catch(() => toast("error", "Couldn't load comments"));
   }
-  void sendPresence();
-}
-
-function startPresence() {
-  if (presenceTimer) clearInterval(presenceTimer);
-  void sendPresence();
-  presenceTimer = setInterval(sendPresence, 10_000);
-}
-
-async function sendPresence() {
-  const { projectId, selectedTaskId } = get();
-  if (!projectId || !isOnline()) return;
-  await call("POST /api/projects/:id/presence", { params: { id: projectId }, body: { taskId: selectedTaskId } }).catch(() => {});
+  // Others see which task is open (presence lives on the realtime service).
+  sendSelect(taskId);
 }

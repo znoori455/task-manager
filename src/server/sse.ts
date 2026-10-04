@@ -10,7 +10,7 @@
 // resumes from Last-Event-ID, i.e. it falls back from push to pull.
 import type { DomainEvent } from "@/domain/events";
 import { eventsSince } from "./commands";
-import { cachedEventsSince, channels, setPresence, subscribe, type LobbyMessage, type ProjectMessage } from "./redis";
+import { cachedEventsSince, channels, subscribe, type LobbyMessage, type ProjectMessage } from "./redis";
 
 const HEARTBEAT_MS = 15_000;
 const GAP_WAIT_MS = 300;
@@ -79,7 +79,7 @@ function sseStream(signal: AbortSignal, start: (conn: Conn) => Promise<() => voi
   );
 }
 
-export function projectStream(projectId: string, since: number, user: string, signal: AbortSignal) {
+export function projectStream(projectId: string, since: number, signal: AbortSignal) {
   return sseStream(signal, async (conn) => {
     let lastSent = since;
     const held = new Map<number, DomainEvent>();
@@ -122,7 +122,6 @@ export function projectStream(projectId: string, since: number, user: string, si
     const unsubscribe = subscribe(channels.project(projectId), (raw) => {
       const msg = JSON.parse(raw) as ProjectMessage;
       if (msg.kind === "event") offer(msg.event);
-      else conn.write(`event: presence\ndata: ${JSON.stringify(msg.users)}\n\n`);
     });
     await fillGap();
     conn.write(`event: ready\ndata: ${JSON.stringify({ version: lastSent })}\n\n`);
@@ -130,7 +129,6 @@ export function projectStream(projectId: string, since: number, user: string, si
     return () => {
       unsubscribe();
       if (gapTimer) clearTimeout(gapTimer);
-      void setPresence(projectId, { name: user, leave: true }).catch(() => {});
     };
   });
 }
