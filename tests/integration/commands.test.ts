@@ -73,7 +73,7 @@ describe("command pipeline", () => {
     const log = await eventsSince(project.id, 0, 10_000);
     const empty: ProjectState = { project: { ...project, version: 0 }, tasks: {}, comments: {} };
     const replayed = applyEvents(empty, log);
-    const { tasks } = await listTasks(project.id, null, 1000);
+    const { tasks } = await listTasks(project.id, { cursor: null, limit: 1000 });
     for (const t of tasks) {
       const r = replayed.tasks[t.id];
       expect({ ...r, createdAt: undefined, updatedAt: undefined }).toEqual({ ...t, createdAt: undefined, updatedAt: undefined });

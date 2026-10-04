@@ -14,9 +14,12 @@ import type { DomainEvent, EventBody } from "@/domain/events";
 import type { Project, Task } from "@/domain/types";
 import { db, tables, type Tx } from "./db";
 import { fromTask, toComment, toProject, toTask } from "./db/mappers";
-import { cacheEvents, channels, publish } from "./redis";
+import { indexProjectCreated, indexWrite } from "./changes";
+import { cacheEvents, channels, publish, redis } from "./redis";
 
 const { projects, tasks, comments, events } = tables;
+
+const LOBBY_THROTTLE_MS = 3000;
 
 export interface CommandResult {
   events: DomainEvent[];
@@ -161,8 +164,11 @@ async function persist(tx: Tx, ctx: DecideContext, newEvents: DomainEvent[]) {
     if (e.type === "comment.deleted") await tx.delete(comments).where(eq(comments.id, e.payload.commentId));
   }
 
-  const { name, description, metadata } = after.project;
-  await tx.update(projects).set({ name, description, metadata, version: after.project.version }).where(eq(projects.id, ctx.project.id));
+  const { name, description, metadata, version, updatedAt } = after.project;
+  await tx.update(projects).set({ name, description, metadata, version, updatedAt }).where(eq(projects.id, ctx.project.id));
+
+  // Still inside the transaction (project row locked): index writes for one project stay ordered.
+  await indexWrite(ctx.project.id, newEvents[0].seq, version, changed, updatedAt);
 
   await tx.insert(events).values(
     newEvents.map((e) => ({
@@ -181,7 +187,10 @@ async function broadcast(projectId: string, newEvents: DomainEvent[]) {
   try {
     for (const event of newEvents) await publish(channels.project(projectId), { kind: "event", event });
     await cacheEvents(projectId, newEvents);
-    if (newEvents.some((e) => e.type === "project.updated")) {
+    // Every write moves the project up the "last updated" list. Tell the lobby,
+    // but at most once per project every few seconds (renames always go out).
+    const renamed = newEvents.some((e) => e.type === "project.updated");
+    if (renamed || (await redis.set(`lobby:throttle:${projectId}`, "1", "PX", LOBBY_THROTTLE_MS, "NX"))) {
       const [row] = await db.select().from(projects).where(eq(projects.id, projectId));
       if (row) await publish(channels.lobby, { kind: "project.upserted", project: toProject(row) });
     }
@@ -215,12 +224,13 @@ export async function eventsSince(projectId: string, since: number, limit: numbe
 
 export async function createProject(input: { name: string; description: string; metadata: Record<string, unknown> }, actor: string, id: string) {
   const now = new Date().toISOString();
-  const project: Project = { id, ...input, version: 1, createdAt: now };
+  const project: Project = { id, ...input, version: 1, createdAt: now, updatedAt: now };
   const body: EventBody = { type: "project.created", payload: { project: { id, ...input, createdAt: now } } };
   await db.transaction(async (tx) => {
     await tx.insert(projects).values(project);
     await tx.insert(events).values({ projectId: id, seq: 1, type: body.type, payload: body.payload, actor, timestamp: now });
   });
+  await indexProjectCreated(id, now);
   await publish(channels.lobby, { kind: "project.upserted", project }).catch(() => {});
   return project;
 }

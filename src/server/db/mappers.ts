@@ -46,7 +46,7 @@ export function fromTask(t: Task): TaskRow {
 }
 
 export function toProject(r: typeof projects.$inferSelect): Project {
-  return { ...r, createdAt: new Date(r.createdAt).toISOString() };
+  return { ...r, createdAt: new Date(r.createdAt).toISOString(), updatedAt: new Date(r.updatedAt).toISOString() };
 }
 
 export function toComment(r: typeof comments.$inferSelect): Comment {

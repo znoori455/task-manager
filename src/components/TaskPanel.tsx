@@ -1,9 +1,12 @@
 "use client";
 import { nanoid } from "nanoid";
-import { useMemo, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 import type { TaskPatch } from "@/contract/schemas";
-import { dispatch, selectTask, useStore } from "@/client/store";
+import { call } from "@/client/api";
+import { dispatch, ensureTasks, ingestTasks, selectTask, useStore } from "@/client/store";
+import { matchesFilter } from "@/contract/filters";
 import { STATUS_LABELS, blockingDependencies, canTransition } from "@/domain/rules";
 import { PRIORITIES, TASK_STATUSES, type Comment, type Priority, type Task, type TaskStatus } from "@/domain/types";
 import { EditableText } from "./EditableText";
@@ -16,7 +19,7 @@ export function TaskPanel({ taskId }: { taskId: string }) {
   if (!task || task.deletedAt) {
     return (
       <aside className="flex w-full max-w-md flex-col items-center justify-center gap-3 border-l border-zinc-200 bg-white p-6 text-sm text-zinc-500">
-        This task was deleted.
+        {task ? "This task was deleted." : "Loading task…"}
         <button className="btn" onClick={() => selectTask(null)}>
           Close
         </button>
@@ -212,20 +215,38 @@ const NO_TASKS: Record<string, Task> = {};
 
 function Dependencies({ task }: { task: Task }) {
   const tasks = useStore((s) => s.view?.tasks ?? NO_TASKS);
+  const projectId = useStore((s) => s.projectId);
+  const online = useStore((s) => s.online);
   const [query, setQuery] = useState("");
+  const [q, setQ] = useState("");
   const blockers = blockingDependencies(task, tasks);
 
+  useEffect(() => ensureTasks(task.dependencies), [task.dependencies]);
+  useEffect(() => {
+    const t = setTimeout(() => setQ(query.trim()), 200);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  // Only a page of tasks is loaded locally, so search the server (cached tasks when offline).
+  const { data: results } = useQuery({
+    queryKey: ["task-search", projectId, q],
+    enabled: !!q && online,
+    queryFn: async () => {
+      const page = await call("GET /api/projects/:id/tasks", { params: { id: projectId! }, query: { q, limit: 10 } });
+      ingestTasks(page.tasks);
+      return page.tasks.map((t) => t.id);
+    },
+    staleTime: 10_000,
+  });
+
   const suggestions = useMemo(() => {
-    const q = query.trim().toLowerCase();
     if (!q) return [];
-    const out: Task[] = [];
-    for (const t of Object.values(tasks)) {
-      if (t.deletedAt || t.id === task.id || task.dependencies.includes(t.id)) continue;
-      if (t.title.toLowerCase().includes(q)) out.push(t);
-      if (out.length >= 8) break;
-    }
-    return out;
-  }, [query, tasks, task]);
+    const ids = online ? (results ?? []) : Object.values(tasks).filter((t) => matchesFilter(t, { q })).map((t) => t.id);
+    return ids
+      .map((id) => tasks[id])
+      .filter((t): t is Task => !!t && !t.deletedAt && t.id !== task.id && !task.dependencies.includes(t.id))
+      .slice(0, 8);
+  }, [q, online, results, tasks, task]);
 
   return (
     <div className="space-y-2">

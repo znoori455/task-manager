@@ -4,7 +4,7 @@
 import type { Comment, CustomFieldValue, Priority, Project, Task, TaskStatus } from "./types";
 
 export type EventBody =
-  | { type: "project.created"; payload: { project: Omit<Project, "version"> } }
+  | { type: "project.created"; payload: { project: Omit<Project, "version" | "updatedAt"> } }
   | { type: "project.updated"; payload: { patch: Partial<Pick<Project, "name" | "description" | "metadata">> } }
   | { type: "task.created"; payload: { task: Task } }
   | {

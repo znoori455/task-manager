@@ -8,6 +8,27 @@
       "when": 1791070298022,
       "tag": "0000_init",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1791153631159,
+      "tag": "0001_pg_trgm",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1791153633502,
+      "tag": "0002_feed_indexes",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1791154653783,
+      "tag": "0003_feed_index_order",
+      "breakpoints": true
     }
   ]
 }

@@ -1,6 +1,7 @@
 "use client";
 import { useEffect, useState } from "react";
 import { call } from "@/client/api";
+import { rememberName, rememberedName } from "@/client/cache";
 import { setMe, useStore } from "@/client/store";
 
 /** Asks for a display name once; it identifies the user in comments, presence and the activity feed. */
@@ -11,7 +12,12 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     call("GET /api/session")
-      .then((r) => setMe(r.name))
+      .then((r) => {
+        setMe(r.name);
+        rememberName(r.name);
+      })
+      // Server unreachable (offline): start with the name remembered on this device.
+      .catch(() => setMe(rememberedName()))
       .finally(() => setChecked(true));
   }, []);
 
@@ -26,6 +32,7 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
           e.preventDefault();
           const r = await call("POST /api/session", { body: { name: name.trim() } });
           setMe(r.name);
+          rememberName(r.name);
         }}
       >
         <h1 className="text-lg font-semibold">Welcome to Taskflow</h1>

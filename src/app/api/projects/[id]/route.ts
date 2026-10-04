@@ -1,6 +1,7 @@
 import { eq } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 import type { ApiResponse } from "@/contract/api";
+import { indexProjectDeleted } from "@/server/changes";
 import { db, tables } from "@/server/db";
 import { HttpError, handler, json } from "@/server/http";
 import { getProject } from "@/server/queries";
@@ -19,6 +20,7 @@ export const DELETE = handler(async (req: NextRequest, { params }: Ctx) => {
   requireUser(req);
   const { id } = await params;
   await db.delete(tables.projects).where(eq(tables.projects.id, id));
+  await indexProjectDeleted(id);
   await publish(channels.lobby, { kind: "project.deleted", projectId: id }).catch(() => {});
   return json({ ok: true } satisfies ApiResponse<"DELETE /api/projects/:id">);
 });

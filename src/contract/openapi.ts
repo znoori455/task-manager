@@ -10,6 +10,7 @@ const project = z.object({
   metadata: z.record(z.string(), z.unknown()),
   version: z.number().int().describe("Seq of the last event in this project's log"),
   createdAt: z.string(),
+  updatedAt: z.string().describe("Time of the last event; the project list is sorted by it"),
 });
 const task = z.object({
   id: z.string(),
@@ -69,8 +70,28 @@ export function openApiDocument() {
         post: { summary: "Set display name (cookie)", requestBody: json(toSchema(sessionSchema)), responses: { 200: ok({ type: "object" }), ...errors } },
       },
       "/api/projects": {
-        get: { summary: "List projects", responses: { 200: ok({ type: "object", properties: { projects: { type: "array", items: ref("Project") } } }) } },
+        get: {
+          summary: "List projects, most recently updated first (keyset pagination)",
+          parameters: [
+            { name: "cursor", in: "query", schema: { type: "string" }, description: "nextCursor from the previous page" },
+            { name: "limit", in: "query", schema: { type: "integer", default: 30, maximum: 100 } },
+          ],
+          responses: { 200: ok({ type: "object", properties: { projects: { type: "array", items: ref("Project") }, nextCursor: { type: ["string", "null"] } } }) },
+        },
         post: { summary: "Create a project", requestBody: json(toSchema(createProjectSchema)), responses: { 201: ok({ type: "object", properties: { project: ref("Project") } }), ...errors } },
+      },
+      "/api/projects/changes": {
+        get: {
+          summary: "Projects updated or deleted since a time (offline catch-up)",
+          description: "Served from Redis sorted sets (projects by last update, plus deletion tombstones kept 30 days). `reset: true` means reload the list.",
+          parameters: [{ name: "since", in: "query", required: true, schema: { type: "integer" }, description: "`now` from the previous response, in ms" }],
+          responses: {
+            200: ok({
+              type: "object",
+              properties: { now: { type: "integer" }, projects: { type: "array", items: ref("Project") }, deleted: { type: "array", items: { type: "string" } }, reset: { type: "boolean" } },
+            }),
+          },
+        },
       },
       "/api/projects/stream": {
         get: { summary: "SSE: project list changes", responses: { 200: { description: "text/event-stream" } } },
@@ -83,16 +104,52 @@ export function openApiDocument() {
       "/api/projects/{id}/tasks": {
         parameters: [idParam],
         get: {
-          summary: "Page through live tasks (keyset pagination)",
+          summary: "Task feed, most recently updated first (keyset pagination on updated_at, id)",
           parameters: [
             { name: "cursor", in: "query", schema: { type: "string" }, description: "nextCursor from the previous page" },
-            { name: "limit", in: "query", schema: { type: "integer", default: 500, maximum: 2000 } },
+            { name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 1000 } },
+            { name: "status", in: "query", schema: { type: "string", enum: ["todo", "in_progress", "in_review", "done"] } },
+            { name: "assignee", in: "query", schema: { type: "string" } },
+            { name: "q", in: "query", schema: { type: "string" }, description: "Title substring (case-insensitive) or exact tag" },
+            { name: "ids", in: "query", schema: { type: "string" }, description: "Comma-separated ids (max 200): fetch specific tasks instead, including deleted ones" },
           ],
           responses: {
             200: ok({
               type: "object",
               properties: { tasks: { type: "array", items: ref("Task") }, nextCursor: { type: ["string", "null"] }, version: { type: "integer" } },
             }),
+          },
+        },
+      },
+      "/api/projects/{id}/tasks/counts": {
+        parameters: [idParam],
+        get: {
+          summary: "Live task counts per status for a filter",
+          parameters: [
+            { name: "assignee", in: "query", schema: { type: "string" } },
+            { name: "q", in: "query", schema: { type: "string" } },
+          ],
+          responses: { 200: ok({ type: "object", properties: { total: { type: "integer" }, byStatus: { type: "object", additionalProperties: { type: "integer" } } } }) },
+        },
+      },
+      "/api/projects/{id}/changes": {
+        parameters: [idParam],
+        get: {
+          summary: "Tasks changed since a version (offline catch-up)",
+          description:
+            "Current rows (including soft-deleted) of every task changed after `since`. Ids come from a Redis sorted set (task id -> seq of last change) with a Postgres fallback for anything the index hasn't confirmed. Resume the SSE stream from the returned `version`. `reset: true` means too much changed; reload.",
+          parameters: [{ name: "since", in: "query", required: true, schema: { type: "integer" }, description: "Last project version the client has" }],
+          responses: {
+            200: ok({
+              type: "object",
+              properties: {
+                version: { type: "integer" },
+                tasks: { type: "array", items: ref("Task") },
+                reset: { type: "boolean" },
+                source: { type: "object", properties: { index: { type: "integer" }, fallback: { type: "integer" }, rebuilt: { type: "boolean" } } },
+              },
+            }),
+            ...errors,
           },
         },
       },

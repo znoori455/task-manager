@@ -1,5 +1,9 @@
 # Load test results
 
+> Measured before the switch to infinite-scroll feeds, when page reads were
+> ordered by `id`. The write path and SSE fan-out haven't changed. Pages are now
+> ordered by `(updated_at, id)` on an equivalent keyset index.
+
 Environment: MacBook (Apple Silicon, arm64), Docker Desktop. **One** Next.js
 production process (`docker compose up`), Postgres 17 and Redis 7 in
 containers on the same machine. Large project = 10,000 tasks (~5 MB in Postgres,
@@ -61,7 +65,10 @@ honours `Retry-After` and keeps the change pending, so nothing is lost.
 
 | query | index | plan |
 | --- | --- | --- |
-| task page: `project_id = ? AND id > cursor AND deleted_at IS NULL ORDER BY id LIMIT n` | partial btree `(project_id, id) WHERE deleted_at IS NULL` | Index Scan, no sort; cost doesn't grow with page depth (keyset, not OFFSET) |
+| task feed: `project_id = ? AND (updated_at, id) < cursor AND deleted_at IS NULL ORDER BY updated_at DESC, id DESC LIMIT n` | partial btree `(project_id, updated_at DESC, id DESC) WHERE deleted_at IS NULL` | Index Scan, no sort; cost doesn't grow with page depth (keyset, not OFFSET) |
+| project feed: `(updated_at, id) < cursor ORDER BY updated_at DESC, id DESC` | btree `(updated_at DESC, id DESC)` | Index Scan |
+| catch-up fallback: `project_id = ? AND version > ?` | btree `(project_id, version)` | Index range scan; only used for writes the Redis index hasn't confirmed |
+| search: `title ILIKE '%q%'` | GIN trigram (`pg_trgm`) on `title` | Bitmap index scan |
 | replay: `events WHERE project_id = ? AND seq > ? ORDER BY seq` | PK `(project_id, seq)` | Index range scan |
 | idempotency: `events WHERE project_id = ? AND client_mutation_id = ?` | btree `(project_id, client_mutation_id)` | Index Scan |
 | comments for a task | btree `(task_id, timestamp)` | Index Scan, pre-sorted |

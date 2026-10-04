@@ -17,6 +17,8 @@ export interface Project {
   /** Sequence number of the last event in this project's log. */
   version: number;
   createdAt: string;
+  /** Time of the last event in this project. */
+  updatedAt: string;
 }
 
 export interface TaskConfiguration {
