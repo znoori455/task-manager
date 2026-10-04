@@ -18,9 +18,12 @@ test("changes sync between clients in real time", async ({ browser, baseURL, req
   await expect(alice.getByText("Live")).toBeVisible();
   await expect(bob.getByText("Live")).toBeVisible();
 
-  // Alice creates a task -> Bob sees it.
+  // Alice creates a task -> it's at the top of her list; Bob's list order is frozen,
+  // so it shows up behind the "updated" pill.
   await alice.getByPlaceholder("Add a task and press Enter").fill("Ship the feature");
   await alice.keyboard.press("Enter");
+  await expect(alice.getByTestId("task-row").first()).toContainText("Ship the feature");
+  await bob.getByTestId("updates-pill").filter({ hasText: "1 updated" }).click();
   await expect(bob.getByTestId("task-row").filter({ hasText: "Ship the feature" })).toBeVisible();
 
   // Bob opens it and comments with a mention -> Alice sees the comment and gets notified.

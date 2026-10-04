@@ -1,9 +1,13 @@
 "use client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
+import { call } from "@/client/api";
 import { closeProject, dispatch, openProject, redo, selectTask, undo, useStore } from "@/client/store";
+import type { TaskCounts } from "@/contract/api";
+import type { TaskFilter } from "@/contract/filters";
 import { STATUS_LABELS } from "@/domain/rules";
-import { TASK_STATUSES, type Task, type TaskStatus } from "@/domain/types";
+import { TASK_STATUSES, type TaskStatus } from "@/domain/types";
 import { nanoid } from "nanoid";
 import { ActivityFeed } from "./ActivityFeed";
 import { Board } from "./Board";
@@ -17,7 +21,6 @@ type Mode = "list" | "board";
 
 export function ProjectView({ projectId }: { projectId: string }) {
   const phase = useStore((s) => s.phase);
-  const loaded = useStore((s) => s.loaded);
   const view = useStore((s) => s.view);
   const selectedTaskId = useStore((s) => s.selectedTaskId);
   const me = useStore((s) => s.me);
@@ -54,19 +57,17 @@ export function ProjectView({ projectId }: { projectId: string }) {
     return () => window.removeEventListener("keydown", onKey);
   }, []);
 
-  const tasks = useMemo(() => {
-    if (!view) return [];
-    const q = search.trim().toLowerCase();
-    const out: Task[] = [];
-    for (const t of Object.values(view.tasks)) {
-      if (t.deletedAt) continue;
-      if (status !== "all" && t.status !== status) continue;
-      if (onlyMine && me && !t.assignedTo.includes(me)) continue;
-      if (q && !t.title.toLowerCase().includes(q) && !t.configuration.tags.some((tag) => tag.toLowerCase().includes(q))) continue;
-      out.push(t);
-    }
-    return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id));
-  }, [view, search, status, onlyMine, me]);
+  // Search runs on the server; wait for a typing pause before refetching.
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  useEffect(() => {
+    const t = setTimeout(() => setDebouncedSearch(search.trim()), 250);
+    return () => clearTimeout(t);
+  }, [search]);
+  const filter = useMemo<TaskFilter>(
+    () => ({ status: status === "all" ? undefined : status, assignee: onlyMine && me ? me : undefined, q: debouncedSearch || undefined }),
+    [status, onlyMine, me, debouncedSearch],
+  );
+  const counts = useTaskCounts(projectId, filter);
 
   const setModeSaved = (m: Mode) => {
     setMode(m);
@@ -89,7 +90,7 @@ export function ProjectView({ projectId }: { projectId: string }) {
 
   return (
     <div className="flex h-full min-h-0 flex-1 flex-col">
-      <Header projectId={projectId} onToggleActivity={() => setShowActivity((v) => !v)} activityOpen={showActivity} />
+      <Header projectId={projectId} total={counts?.total} onToggleActivity={() => setShowActivity((v) => !v)} activityOpen={showActivity} />
 
       <div className="flex flex-wrap items-center gap-2 border-b border-zinc-200 bg-white px-4 py-2">
         <form
@@ -134,10 +135,8 @@ export function ProjectView({ projectId }: { projectId: string }) {
 
       <div className="flex min-h-0 flex-1">
         <main className="flex min-w-0 flex-1 flex-col">
-          {phase === "loading" && (
-            <div className="border-b border-zinc-200 bg-sky-50 px-4 py-1.5 text-xs text-sky-800">Loading tasks… {loaded.toLocaleString()} so far</div>
-          )}
-          {view && (mode === "list" ? <TaskList tasks={tasks} selectedId={selectedTaskId} /> : <Board tasks={tasks} />)}
+          <OfflineBanner />
+          {view && (mode === "list" ? <TaskList filter={filter} selectedId={selectedTaskId} /> : <Board filter={filter} counts={counts} />)}
         </main>
         {selectedTaskId && <TaskPanel key={selectedTaskId} taskId={selectedTaskId} />}
         {showActivity && <ActivityFeed onClose={() => setShowActivity(false)} />}
@@ -147,16 +146,65 @@ export function ProjectView({ projectId }: { projectId: string }) {
   );
 }
 
-function Header({ projectId, onToggleActivity, activityOpen }: { projectId: string; onToggleActivity: () => void; activityOpen: boolean }) {
+/**
+ * Live task counts for the current filter. Refetched (debounced) as events
+ * arrive, since rows outside the loaded pages can change too.
+ */
+function useTaskCounts(projectId: string, filter: TaskFilter): TaskCounts | undefined {
+  const online = useStore((s) => s.online);
+  const version = useStore((s) => s.confirmed?.project.version ?? 0);
+  const queryClient = useQueryClient();
+  const key = ["counts", projectId, filter.assignee ?? null, filter.q ?? null];
+  const { data } = useQuery({
+    queryKey: key,
+    enabled: online,
+    queryFn: () => call("GET /api/projects/:id/tasks/counts", { params: { id: projectId }, query: { assignee: filter.assignee, q: filter.q } }),
+    staleTime: Infinity,
+    placeholderData: (prev) => prev,
+  });
+  const keyString = JSON.stringify(key);
+  useEffect(() => {
+    const t = setTimeout(() => void queryClient.invalidateQueries({ queryKey: JSON.parse(keyString) }), 1500);
+    return () => clearTimeout(t);
+  }, [version, keyString, queryClient]);
+  return data;
+}
+
+function OfflineBanner() {
+  const connection = useStore((s) => s.connection);
+  const fromCache = useStore((s) => s.fromCache);
+  const pending = useStore((s) => s.pending.length);
+  if (connection !== "offline" && !fromCache) return null;
+  return (
+    <div className="border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-xs text-amber-900" data-testid="offline-banner">
+      {connection === "offline" ? "You're offline. Showing the copy saved on this device" : "Showing the copy saved on this device while syncing"}
+      {pending > 0 && ` · ${pending} change${pending === 1 ? "" : "s"} will sync when you're back online`}
+    </div>
+  );
+}
+
+function Header({
+  projectId,
+  total,
+  onToggleActivity,
+  activityOpen,
+}: {
+  projectId: string;
+  total: number | undefined;
+  onToggleActivity: () => void;
+  activityOpen: boolean;
+}) {
   const project = useStore((s) => s.view?.project);
   const connection = useStore((s) => s.connection);
   const presence = useStore((s) => s.presence);
   const pendingCount = useStore((s) => s.pending.length);
   const canUndo = useStore((s) => s.undoStack.length > 0);
   const canRedo = useStore((s) => s.redoStack.length > 0);
-  const taskCount = useStore((s) => (s.view ? Object.values(s.view.tasks).filter((t) => !t.deletedAt).length : 0));
+  const cachedCount = useStore((s) => (s.view ? Object.values(s.view.tasks).filter((t) => !t.deletedAt).length : 0));
+  const taskCount = total ?? cachedCount;
 
-  const dot = connection === "live" ? "bg-emerald-500" : connection === "connecting" ? "bg-amber-400" : "bg-rose-500";
+  const dot = connection === "live" ? "bg-emerald-500" : connection === "connecting" ? "bg-amber-400" : connection === "offline" ? "bg-zinc-400" : "bg-rose-500";
+  const label = { live: "Live", connecting: "Connecting", reconnecting: "Reconnecting", offline: "Offline" }[connection];
 
   return (
     <header className="flex flex-wrap items-center gap-3 border-b border-zinc-200 bg-white px-4 py-3">
@@ -186,7 +234,7 @@ function Header({ projectId, onToggleActivity, activityOpen }: { projectId: stri
 
       <span className="flex items-center gap-1.5 text-xs text-zinc-500" title={`Connection: ${connection}`}>
         <span className={`h-2 w-2 rounded-full ${dot}`} />
-        {pendingCount > 0 ? `Saving ${pendingCount}…` : connection === "live" ? "Live" : connection === "connecting" ? "Connecting" : "Reconnecting"}
+        {pendingCount > 0 ? (connection === "offline" ? `${pendingCount} unsynced` : `Saving ${pendingCount}…`) : label}
       </span>
 
       <div className="flex gap-1">

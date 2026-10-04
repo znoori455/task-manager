@@ -1,20 +1,24 @@
 "use client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
+import { useShowTaskUpdates, useTaskFeed } from "@/client/feeds";
 import { dispatch, selectTask, useStore } from "@/client/store";
+import { useInfiniteTrigger } from "@/client/useInfiniteTrigger";
+import type { TaskCounts } from "@/contract/api";
+import type { TaskFilter } from "@/contract/filters";
 import { STATUS_LABELS, canTransition } from "@/domain/rules";
 import { TASK_STATUSES, type Task, type TaskStatus } from "@/domain/types";
 import { Avatar, PriorityLabel, STATUS_STYLES } from "./ui";
+import { UpdatesPill } from "./UpdatesPill";
 
 const CARD_HEIGHT = 84;
 
-/** Kanban board. Dropping a card on a column is a status transition, validated by the same rules as everywhere else. */
-export function Board({ tasks }: { tasks: Task[] }) {
-  const columns = useMemo(() => {
-    const by: Record<TaskStatus, Task[]> = { todo: [], in_progress: [], in_review: [], done: [] };
-    for (const t of tasks) by[t.status].push(t);
-    return by;
-  }, [tasks]);
+/**
+ * Kanban board. Each column is its own infinite-scroll feed filtered by
+ * status. Dropping a card on a column is a status transition, validated by the
+ * same rules as everywhere else.
+ */
+export function Board({ filter, counts }: { filter: TaskFilter; counts: TaskCounts | undefined }) {
   const [dragging, setDragging] = useState<Task | null>(null);
 
   return (
@@ -23,7 +27,8 @@ export function Board({ tasks }: { tasks: Task[] }) {
         <Column
           key={status}
           status={status}
-          tasks={columns[status]}
+          filter={filter}
+          count={counts?.byStatus[status]}
           dragging={dragging}
           onDragStart={setDragging}
           onDrop={(task) => {
@@ -38,26 +43,37 @@ export function Board({ tasks }: { tasks: Task[] }) {
 
 function Column({
   status,
-  tasks,
+  filter,
+  count,
   dragging,
   onDragStart,
   onDrop,
 }: {
   status: TaskStatus;
-  tasks: Task[];
+  filter: TaskFilter;
+  count: number | undefined;
   dragging: Task | null;
   onDragStart: (t: Task | null) => void;
   onDrop: (t: Task) => void;
 }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const [over, setOver] = useState(false);
-  const virtualizer = useVirtualizer({ count: tasks.length, getScrollElement: () => parentRef.current, estimateSize: () => CARD_HEIGHT, overscan: 5 });
+  const columnFilter = useMemo(() => ({ ...filter, status }), [filter, status]);
+  const feed = useTaskFeed(columnFilter);
+  const showUpdates = useShowTaskUpdates();
+  const virtualizer = useVirtualizer({
+    count: feed.ids.length + (feed.hasNextPage ? 1 : 0),
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => CARD_HEIGHT,
+    overscan: 5,
+  });
+  useInfiniteTrigger(virtualizer, feed, 5);
   const allowed = dragging ? canTransition(dragging.status, status) : true;
 
   return (
     <section
       data-testid={`column-${status}`}
-      className={`flex min-h-64 flex-col rounded-lg border bg-white transition md:min-h-0 ${over ? (allowed ? "border-sky-400 ring-2 ring-sky-100" : "border-rose-300") : "border-zinc-200"} ${dragging && !allowed ? "opacity-50" : ""}`}
+      className={`relative flex min-h-64 flex-col rounded-lg border bg-white transition md:min-h-0 ${over ? (allowed ? "border-sky-400 ring-2 ring-sky-100" : "border-rose-300") : "border-zinc-200"} ${dragging && !allowed ? "opacity-50" : ""}`}
       onDragOver={(e) => {
         e.preventDefault();
         setOver(true);
@@ -71,26 +87,37 @@ function Column({
     >
       <header className="flex items-center justify-between border-b border-zinc-100 px-3 py-2">
         <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${STATUS_STYLES[status]}`}>{STATUS_LABELS[status]}</span>
-        <span className="text-xs text-zinc-400">{tasks.length.toLocaleString()}</span>
+        <span className="text-xs text-zinc-400">{(count ?? feed.ids.length).toLocaleString()}</span>
       </header>
-      <div ref={parentRef} className="min-h-0 flex-1 overflow-auto p-2">
-        <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
-          {virtualizer.getVirtualItems().map((row) => {
-            const task = tasks[row.index];
-            return (
-              <div key={task.id} style={{ position: "absolute", top: 0, left: 0, right: 0, height: CARD_HEIGHT, transform: `translateY(${row.start}px)` }} className="pb-2">
-                <Card task={task} onDragStart={onDragStart} />
-              </div>
-            );
-          })}
+      <div className="relative min-h-0 flex-1">
+        <UpdatesPill
+          count={feed.updates}
+          onShow={() => {
+            parentRef.current?.scrollTo({ top: 0 });
+            showUpdates();
+          }}
+        />
+        <div ref={parentRef} className="absolute inset-0 overflow-auto p-2">
+          <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+            {virtualizer.getVirtualItems().map((row) => {
+              const id = feed.ids[row.index];
+              return (
+                <div key={id ?? "loader"} style={{ position: "absolute", top: 0, left: 0, right: 0, height: CARD_HEIGHT, transform: `translateY(${row.start}px)` }} className="pb-2">
+                  {id ? <Card id={id} onDragStart={onDragStart} /> : <div className="p-2 text-xs text-zinc-400">Loading more…</div>}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
     </section>
   );
 }
 
-function Card({ task, onDragStart }: { task: Task; onDragStart: (t: Task | null) => void }) {
-  const selected = useStore((s) => s.selectedTaskId === task.id);
+function Card({ id, onDragStart }: { id: string; onDragStart: (t: Task | null) => void }) {
+  const task: Task | undefined = useStore((s) => s.view?.tasks[id]);
+  const selected = useStore((s) => s.selectedTaskId === id);
+  if (!task) return null;
   return (
     <div
       draggable

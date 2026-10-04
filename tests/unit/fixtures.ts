@@ -2,7 +2,7 @@ import type { ProjectState } from "@/domain/apply";
 import type { DomainEvent, EventBody } from "@/domain/events";
 import type { Project, Task } from "@/domain/types";
 
-export const project: Project = { id: "p1", name: "P", description: "", metadata: {}, version: 0, createdAt: "2026-01-01T00:00:00.000Z" };
+export const project: Project = { id: "p1", name: "P", description: "", metadata: {}, version: 0, createdAt: "2026-01-01T00:00:00.000Z", updatedAt: "2026-01-01T00:00:00.000Z" };
 
 export function task(id: string, over: Partial<Task> = {}): Task {
   return {

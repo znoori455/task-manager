@@ -9,7 +9,13 @@ export const projects = pgTable("projects", {
   // Per-project sequencer: incremented under a row lock for every event.
   version: bigint("version", { mode: "number" }).notNull().default(0),
   createdAt: timestamp("created_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
-});
+  // Bumped by every event in the project; the project list is sorted by it.
+  updatedAt: timestamp("updated_at", { withTimezone: true, mode: "string" }).notNull().defaultNow(),
+}, (t) => [
+  // Project list keyset pagination: ORDER BY updated_at DESC, id DESC (a backward
+  // scan of this ascending index; an explicit DESC would get NULLS LAST and not match).
+  index("projects_updated_idx").on(t.updatedAt, t.id),
+]);
 
 export const tasks = pgTable(
   "tasks",
@@ -33,8 +39,13 @@ export const tasks = pgTable(
     deletedAt: timestamp("deleted_at", { withTimezone: true, mode: "string" }),
   },
   (t) => [
-    // Cursor pagination of live tasks within a project: WHERE project_id = ? AND id > ? ORDER BY id.
-    index("tasks_project_live_id_idx").on(t.projectId, t.id).where(sql`${t.deletedAt} IS NULL`),
+    // Task feed keyset pagination: WHERE project_id = ? AND (updated_at, id) < cursor ORDER BY updated_at DESC, id DESC.
+    // Ascending on purpose: scanned backward it yields exactly DESC (NULLS FIRST) order.
+    index("tasks_project_updated_idx").on(t.projectId, t.updatedAt, t.id).where(sql`${t.deletedAt} IS NULL`),
+    // Catch-up fallback when the Redis change index is behind: WHERE project_id = ? AND version > ?.
+    index("tasks_project_version_idx").on(t.projectId, t.version),
+    // Server-side search: title ILIKE '%q%' (needs the pg_trgm extension, see drizzle/0001).
+    index("tasks_title_trgm_idx").using("gin", sql`${t.title} gin_trgm_ops`),
     // Server-side filtering by status (board columns, counts).
     index("tasks_project_status_idx").on(t.projectId, t.status).where(sql`${t.deletedAt} IS NULL`),
     // "Which tasks are tagged X / assigned to Y / depend on Z" lookups.

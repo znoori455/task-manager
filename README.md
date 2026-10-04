@@ -4,7 +4,9 @@ A Next.js (App Router) full-stack app built on Postgres and Redis. There is no
 managed real-time database. Every change is an **event** in an append-only,
 per-project log. Clients receive those events (not projects) over
 **Server-Sent Events**, and they all apply them in the same order, so every
-client ends up in the same state.
+client ends up in the same state. Tasks and projects load as infinite-scroll
+feeds sorted by last updated, and are cached in IndexedDB, so the app keeps
+working offline and catches up from a Redis change index when it reconnects.
 
 ```bash
 docker compose up --build          # app on http://localhost:3000 (runs migrations on start)
@@ -22,6 +24,7 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
 1. [What's implemented](#whats-implemented)
 2. [Architecture](#architecture)
 3. [How sync works](#how-sync-works)
+   - [Offline and catch-up](#offline-and-catch-up)
 4. [Consistency model](#consistency-model)
 5. [Scaling over time](#scaling-over-time)
 6. [Tradeoffs](#tradeoffs)
@@ -44,7 +47,7 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
 | Near-real-time sync | SSE push. Commit → other client p95 ≈ 35 ms with 200 listeners ([results](load/RESULTS.md)) |
 | Consistency across clients | One ordered log per project, and one deterministic reducer shared by server and clients ([below](#consistency-model)) |
 | No Firebase/Supabase | Postgres + Redis + SSE only |
-| 2 MB+ projects / don't resend projects | Initial load is paged (keyset). After that only events of ~300 B each are sent. A 10k-task / ~7 MB project is in the seed |
+| 2 MB+ projects / don't resend projects | Nothing loads a whole project. Tasks come in infinite-scroll pages of 50 (keyset cursor). After that only events of ~300 B each are sent, and a returning client gets only the tasks that changed. A 10k-task / ~7 MB project is in the seed |
 
 **Bonus points**
 
@@ -57,14 +60,15 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
 | Type-safe API contract | zod schemas in `src/contract/` validate requests on the server, provide TS types to the client, and generate the OpenAPI doc. Route ↔ response types are checked via `ApiResponse<"POST /api/...">` |
 | Optimistic UI with rollback | Changes show instantly. Rejected ones are rolled back with a toast. Remote events are applied first and pending local changes re-applied on top: `src/client/store.ts` |
 | DB transactions | Each command: lock project row → load → validate → upsert → append event, all in one transaction |
-| Caching | Redis keeps each project's last 500 events, so reconnects replay without hitting Postgres. Fan-out is in memory per process (one Redis subscription per project per instance) |
-| Rate limiting + backpressure | Redis token bucket per user (429 + `Retry-After`). Each SSE connection has a capped queue: slow clients are dropped and resume from `Last-Event-ID`. Clients far behind get `resync` and reload |
+| Caching | Server: Redis keeps each project's last 500 events (fast reconnect replay) and a sorted-set change index per project (fast catch-up). Fan-out is in memory per process (one Redis subscription per project per instance). Client: IndexedDB copy of every task and project it has seen, plus unsent edits |
+| Rate limiting + backpressure | Redis token bucket per user (429 + `Retry-After`). Each SSE connection has a capped queue: slow clients are dropped and resume from `Last-Event-ID`. Clients far behind get `resync` and catch up with changed rows instead of a replay |
 
 **Extended challenges**
 
 - **Option 1, Performance & scale:**
-  - virtual scrolling (list and every board column; 10k tasks render about 25 DOM rows),
-  - cursor pagination,
+  - infinite scroll with TanStack Query, sorted by last updated, with a keyset cursor on `(updated_at, id)`; each board column is its own feed,
+  - virtual scrolling (list and every board column; about 25 DOM rows however many pages are loaded),
+  - server-side search, filters and counts (trigram index for title search),
   - indexing strategy,
   - load tests with scripts and [results](load/RESULTS.md).
 - **Option 3, Developer experience:**
@@ -76,7 +80,9 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
   - presence (who's in the project and which task they have open),
   - a live activity feed,
   - @mentions with notifications.
-- **Option 4, partly:** a Kanban board with drag and drop. Dropping a card is validated as a status transition.
+- **Option 4, partly:**
+  - a Kanban board with drag and drop. Dropping a card is validated as a status transition.
+  - offline support: tasks, projects and unsent edits are kept in IndexedDB, and a service worker caches the app shell so the app opens without a network. Edits made offline sync on reconnect, and conflicting ones are rolled back with a message ([how](#offline-and-catch-up)).
 
 ---
 
@@ -129,17 +135,24 @@ making a request.
 
 ### Read and subscribe path
 
-- `GET /projects/:id` returns metadata and `version`. The client then opens
-  `GET /projects/:id/stream?since=version` **before** loading tasks, and
-  buffers the events it receives.
-- `GET /projects/:id/tasks?cursor=…&limit=1000` uses keyset pagination over
-  `(project_id, id)`. Pages render as they arrive (the progress bar shows the
-  count).
-- Once all pages are loaded, the buffered events are applied. Each task stores
-  the `seq` of the last event that changed it, so events already included in a
-  page are skipped. This makes "load pages while events keep arriving"
-  race-free without a snapshot transaction.
-- Comments are loaded only when a task is opened.
+- **Open a project:** render the IndexedDB copy if there is one, then catch up
+  ([below](#offline-and-catch-up)), then open
+  `GET /projects/:id/stream?since=<version>`.
+- **Feeds** (`src/client/feeds.ts`): `GET /projects/:id/tasks?cursor=…&status=…&q=…`
+  returns 50 tasks, most recently updated first, using keyset pagination on
+  `(updated_at, id)` (index `tasks_project_updated_idx`). TanStack Query's
+  `useInfiniteQuery` fetches the next page when the virtualized list is about
+  10 rows from the end. Page rows go into the sync store, and a feed is just an
+  ordered list of ids.
+- **Frozen order.** Rows update in place, but changes by others don't reorder
+  the list. A pill counts them ("3 updated · show"), and clicking it refetches
+  from the top. Your own new tasks are pinned to the top.
+- **Events for tasks not loaded yet** are held, and the task's row is fetched
+  by id (batched). Each task stores the `seq` of the last event that changed
+  it, so held events already reflected in the row are skipped. Loading pages
+  while events keep arriving is race-free without a snapshot transaction.
+- Comments load only when a task is opened. Dependencies of visible tasks are
+  fetched on demand, for the "blocked" badge.
 
 ---
 
@@ -155,7 +168,7 @@ making a request.
   deliver out of order (concurrent publishers) or drop messages, so events
   arriving early are held briefly and gaps are filled from the cache or DB.
 - If a client is more than 1,000 events behind, it gets a `resync` event and
-  reloads the project instead.
+  catches up with changed rows instead (next section).
 
 **Client → server: one command endpoint.**
 
@@ -188,6 +201,53 @@ view = applyEvents(confirmed, pending.events with provisional seqs)
 **Presence** is a Redis hash per project with a 30 s TTL. Clients send a
 heartbeat every 10 s and whenever they open a task, and the server pushes the
 list on the same SSE stream.
+
+### Offline and catch-up
+
+**On the client** (`src/client/cache.ts`, `src/client/store.ts`):
+
+- Every task the client has seen, its open comment threads, and the queue of
+  unsent edits are saved to IndexedDB (debounced; edits are saved almost
+  immediately). The cached `project.version` records which point in the log
+  the copy reflects.
+- Offline, the app keeps working against that copy. `decide()` still runs
+  locally, so invalid edits are refused at once. Edits wait in the persisted
+  queue and survive a reload.
+- A service worker (`public/sw.js`, production builds only) caches the app
+  shell, so the app opens with no network. API data never goes through it.
+
+**Coming back** (opening a project, or the browser's `online` event):
+
+1. `GET /projects/:id/changes?since=<cached version>` returns the **current
+   rows** of just the tasks that changed, including deleted ones. Example:
+   offline for a day, 50k events that touched 300 tasks → 300 rows, not 50k
+   events and not the whole project.
+2. Resume the SSE stream from the returned version.
+3. Send the queued edits in order. The server re-validates each one against
+   current data. If an edit conflicts with what happened meanwhile (e.g. the
+   task was deleted), it's rejected and rolled back with a message.
+
+**On the server** (`src/server/changes.ts`):
+
+- **Task change index:** one Redis sorted set per project, member = task id,
+  score = seq of the task's last change. It has one entry per task, so it's
+  bounded by the number of tasks, not the number of writes.
+  - It's written inside the write transaction while the project row is locked,
+    so index writes for one project are ordered.
+  - Reading it is a single `ZRANGEBYSCORE (since +inf`.
+- **Redis can't lose an update.** Redis isn't part of the Postgres transaction,
+  so an index write can be missed.
+  - A sentinel member records "complete through seq N". It only advances when
+    the previous write was also indexed.
+  - Anything newer than N is read from Postgres (`tasks_project_version_idx`).
+  - A missing set (e.g. Redis restarted) or one lagging badly is rebuilt from
+    Postgres under the project lock.
+  - Integration tests cover each of these paths.
+- **Projects:** a global sorted set by last-updated time, plus a sorted set of
+  deletions kept for 30 days, so a returning client can drop deleted projects.
+  `GET /api/projects/changes?since=<server time>` reads both. The index is
+  rebuilt at least every 10 minutes, which bounds staleness if a write to it
+  was missed.
 
 ---
 
@@ -226,13 +286,13 @@ What's built (one region, N stateless app instances) and the next steps:
 2. **Reads.** Send task pages, comment threads and replays to Postgres read
    replicas. Replays are already mostly served from Redis.
 3. **Large projects.**
-   - Initial load is already paged and proportional to page size.
-   - Next: send only the visible subset (server-side filtering by status/tag
-     using the existing partial and GIN indexes), and cache page snapshots by
-     `(project, version)` in Redis or a CDN.
-   - Snapshot plus log tail: keep a compacted snapshot every N events, so
-     clients that were offline a long time load the snapshot and replay the
-     tail.
+   - Already in place: loads are paged, so memory and first-load time stay flat
+     as projects grow. Returning clients get only changed rows.
+   - Next: cache hot first pages by `(project, filter, version)` in Redis or a
+     CDN.
+   - Rebuilding the change index reads every task id of a project. At millions
+     of tasks per project, rebuild incrementally, or keep the index in a
+     durable store.
 4. **Event log growth.** Partition `events` by project hash or time, archive
    old partitions to object storage, and keep recent events hot.
 5. **Write throughput.**
@@ -257,9 +317,10 @@ What's built (one region, N stateless app instances) and the next steps:
 - **Server-ordered log instead of a full CRDT.**
   - Easier to reason about, makes business rules enforceable (cycles,
     workflow), and gives every client the same history.
-  - Downside: edits need the server (no offline-first). Concurrent edits to the
-    *same* text field are last-writer-wins, not merged character by character.
-    The next step would be Yjs for the description field only.
+  - Downside: offline edits are tentative until the server accepts them.
+    Conflicting ones are rolled back rather than merged. Concurrent edits to
+    the *same* text field are last-writer-wins, not merged character by
+    character. The next step would be Yjs for the description field only.
 - **Per-project row lock.** Simple and correct (gap-free seq, serialized
   invariant checks) at the cost of throughput per project; see scaling point 5.
 - **Read model and log written in one transaction.** No eventual-consistency
@@ -269,9 +330,17 @@ What's built (one region, N stateless app instances) and the next steps:
   and publish would leave an event in the log but not pushed. Clients recover:
   they detect the gap, or the 5 s watchdog fires, and replay from Postgres. A
   transactional outbox would make delivery strictly reliable.
-- **Client loads all tasks.** Simple, and makes filtering, search, the board
-  and the dependency picker instant for 10k+ tasks. At around 100k tasks I'd
-  switch to server-side filtered windows.
+- **Infinite scroll instead of loading everything.** Memory and first load
+  stay constant whatever the project size, but search, filters, counts and the
+  dependency picker now go to the server, and each filter change refetches.
+  Offline, they work over the cached tasks only.
+- **Frozen order with an "N updated" pill.** Rows don't jump while you're
+  about to click them, at the cost of others' new tasks not appearing until you
+  click "show".
+- **Change index outside the transaction.** Redis writes can't be atomic with
+  Postgres. Instead of making writes depend on Redis (Redis down would mean no
+  writes), the index tracks how far it's known to be complete, and Postgres
+  fills the gap. Writes stay available, and catch-up stays correct.
 - **Identity is a display-name cookie.** No auth, on purpose: it's outside the
   brief, and the design doesn't depend on it (`src/server/session.ts` is the
   only place to change). Any user can access any project.
@@ -284,12 +353,15 @@ What's built (one region, N stateless app instances) and the next steps:
 | --- | --- |
 | **Next.js 16 App Router** (route handlers) | Preferred stack. One TypeScript codebase, so the domain logic and the contract are shared, not duplicated |
 | **Postgres** | Transactions, row locks for sequencing, recursive CTEs for graph checks, partial and GIN indexes. The event log and the tables share one transaction |
-| **Redis** | Pub/sub across instances, recent-events cache, atomic token bucket in Lua, presence with TTL |
+| **Redis** | Pub/sub across instances, recent-events cache, sorted-set change indexes for catch-up, atomic token bucket in Lua, presence with TTL |
 | **SSE** | Server→client push that works through proxies and HTTP/2, with automatic resume built in |
 | **Drizzle ORM** | Typed schema, SQL-first queries, generated SQL migrations committed to the repo |
 | **zod** | One schema per request type → runtime validation, TS types and OpenAPI |
 | **zustand** | Small store outside React, so the sync engine is plain TS. Components subscribe with fine-grained selectors |
+| **TanStack Query** | `useInfiniteQuery` for cursor-paginated feeds (tasks, board columns, projects), counts and search. Live updates come from SSE, so queries never go stale on their own |
 | **TanStack Virtual** | Virtualizes the list and each board column |
+| **IndexedDB** (`idb-keyval`) | Offline copy of tasks, projects and unsent edits. `localStorage` is capped at ~5 MB and blocks the main thread; one 10k-task project is ~7 MB |
+| **Service worker** | Caches the app shell so the app opens offline (data stays in IndexedDB) |
 | **Vitest / Playwright / k6** | Unit and integration / two-browser e2e / load |
 
 ---
@@ -310,7 +382,7 @@ npm run dev            # http://localhost:3000
 | Command | |
 | --- | --- |
 | `npm test` | Unit tests (domain) + integration tests (needs db/redis running) |
-| `npm run test:e2e` | Playwright: two browsers collaborating (starts a dev server on :3100) |
+| `npm run test:e2e` | Playwright: two browsers collaborating, offline edits (starts a dev server on :3100; use `E2E_PORT=3000` to reuse a running one). With `CI=1` it runs against `next start` and includes the offline-reload test |
 | `npm run typecheck` / `npm run lint` | |
 | `npm run db:generate` | New migration from `src/server/db/schema.ts` |
 | `npx tsx load/fanout.ts <projectId>` | SSE fan-out latency test |
@@ -322,7 +394,7 @@ Playwright e2e, and a Docker image build.
 
 ## Project layout
 
-Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `client/store.ts`.
+Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `server/changes.ts` → `client/store.ts` → `client/feeds.ts`.
 
 | Path | What it is |
 | --- | --- |
@@ -332,17 +404,23 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `decide.ts` | Command → events, or a `DomainError` when a rule is broken |
 | ├─ `apply.ts` | The only reducer: applies events to state |
 | └─ `undo.ts` | Computes the inverse command for undo/redo |
-| `src/contract/` | The API contract: `schemas.ts` (zod request validation), `api.ts` (response types per route), `openapi.ts` (generated docs) |
+| `src/contract/` | The API contract: `schemas.ts` (zod request validation), `api.ts` (response types per route), `filters.ts` (feed filters, applied identically by server and client), `openapi.ts` (generated docs) |
 | `src/server/` | Backend code, called by the route handlers. |
 | ├─ `commands.ts` | **The write path:** lock → validate → persist → append event → publish |
 | ├─ `sse.ts` | Event streams: ordered, gap-free delivery, replay, backpressure |
 | ├─ `redis.ts` | Pub/sub fan-out, recent-events cache, presence, rate limiter |
-| ├─ `queries.ts` | Read endpoints (paginated tasks, comments, activity) |
+| ├─ `changes.ts` | Catch-up for returning clients: Redis sorted-set change indexes with a Postgres safety net |
+| ├─ `queries.ts` | Read endpoints (task/project feeds, counts, comments, activity) |
 | └─ `db/schema.ts` | Tables and indexes (Drizzle); migrations are generated from this |
-| `src/client/store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection |
+| `src/client/` | Frontend data layer. |
+| ├─ `store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection, offline queue, catch-up |
+| ├─ `feeds.ts` | Infinite-scroll feeds (TanStack Query) with frozen order and the "N updated" count |
+| ├─ `cache.ts` | IndexedDB persistence |
+| └─ `projects.ts` | Project list state, lobby stream and catch-up |
 | `src/app/api/` | Thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint |
 | `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments) |
-| `drizzle/` | Generated SQL migrations (don't edit; run `npm run db:generate`) |
+| `drizzle/` | SQL migrations, generated by `npm run db:generate`. Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
 | `scripts/` | `migrate.ts`, `seed.ts` |
-| `tests/` | `unit/` (domain), `integration/` (write path on real Postgres/Redis), `e2e/` (two-browser Playwright) |
+| `tests/` | `unit/` (domain), `integration/` (write path and catch-up on real Postgres/Redis), `e2e/` (two-browser collaboration, offline) |
+| `public/sw.js` | Service worker: caches the app shell for offline starts |
 | `load/` | Load-test scripts (k6 and SSE fan-out) and `RESULTS.md` |

@@ -30,7 +30,10 @@ export function applyEvents(state: ProjectState, events: readonly DomainEvent[])
 }
 
 function applyInPlace(s: ProjectState, e: DomainEvent) {
-  s.project.version = Math.max(s.project.version, e.seq);
+  if (e.seq > s.project.version) {
+    s.project.version = e.seq;
+    s.project.updatedAt = e.timestamp;
+  }
 
   const updateTask = (taskId: string, fn: (t: Task) => Partial<Task>) => {
     const task = s.tasks[taskId];
