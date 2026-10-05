@@ -15,6 +15,7 @@ import { Board } from "./Board";
 import { EditableText } from "./EditableText";
 import { TaskList } from "./TaskList";
 import { TaskPanel } from "./TaskPanel";
+import { preloadDescriptionEditor } from "./DescriptionField";
 import { NotificationBell } from "./NotificationBell";
 import { UserMenu } from "./UserMenu";
 import { Avatar } from "./ui";
@@ -47,6 +48,7 @@ export function ProjectView({ projectId }: { projectId: string }) {
       if (task) selectTask(task);
     });
     joinRoom({ projectId });
+    if (navigator.onLine) preloadDescriptionEditor();
     return closeProject;
   }, [projectId]);
 

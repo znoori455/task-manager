@@ -3,6 +3,7 @@ import Redis from "ioredis";
 import { nanoid } from "nanoid";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
+import * as Y from "yjs";
 import type { ServerMessage } from "@/contract/realtime";
 import { startRealtimeServer } from "../../realtime/server";
 
@@ -53,7 +54,7 @@ function connect(name: string | null, origin = ORIGIN): Promise<Client> {
 }
 
 beforeAll(async () => {
-  server = await startRealtimeServer({ port: 0, redisUrl: REDIS_URL, allowedOrigins: [ORIGIN] });
+  server = await startRealtimeServer({ port: 0, redisUrl: REDIS_URL, allowedOrigins: [ORIGIN], docTtlSeconds: 2 });
   redis = new Redis(REDIS_URL);
 });
 
@@ -138,5 +139,83 @@ describe("realtime service", () => {
     const closed = new Promise<number>((r) => spammer.ws.on("close", (code) => r(code)));
     for (let i = 0; i < 300; i++) spammer.send({ type: "cursor", cursor: null });
     expect(await closed).toBe(1008);
+  });
+
+  describe("shared description drafts", () => {
+    const b64 = (u: Uint8Array) => Buffer.from(u).toString("base64");
+    const bytes = (s: string) => new Uint8Array(Buffer.from(s, "base64"));
+
+    /** A client editing a task's description through the service, like the browser does. */
+    async function editor(name: string, taskId: string, seed: string) {
+      const client = await connect(name);
+      const doc = new Y.Doc();
+      let generation = "";
+      client.ws.on("message", (raw) => {
+        const msg = JSON.parse(raw.toString()) as ServerMessage;
+        if (msg.type === "doc.update" && msg.taskId === taskId) Y.applyUpdate(doc, bytes(msg.update), "remote");
+      });
+      doc.on("update", (update: Uint8Array, origin: unknown) => {
+        if (origin !== "remote" && generation) client.send({ type: "doc.update", taskId, generation, update: b64(update) });
+      });
+      client.send({ type: "doc.join", taskId, seed, clientId: doc.clientID });
+      const sync = await client.next("doc.sync", (m) => m.taskId === taskId);
+      generation = sync.generation;
+      Y.applyUpdate(doc, bytes(sync.state), "remote");
+      return { client, doc, text: () => doc.getText("description").toString(), generation };
+    }
+
+    it("seeds the draft exactly once, even when two people open it at the same moment", async () => {
+      const taskId = `t-${nanoid(6)}`;
+      const [a, b] = await Promise.all([editor("ann", taskId, "Hello"), editor("ben", taskId, "Hello")]);
+      expect(a.text()).toBe("Hello"); // not "HelloHello"
+      expect(b.text()).toBe("Hello");
+      expect(a.generation).toBe(b.generation);
+      a.client.close();
+      b.client.close();
+    });
+
+    it("merges concurrent edits, and late joiners get the current text", async () => {
+      const taskId = `t-${nanoid(6)}`;
+      const a = await editor("ann", taskId, "ship it");
+      const b = await editor("ben", taskId, "ship it");
+      a.doc.getText("description").insert(0, "Please ");
+      b.doc.getText("description").insert(7, " today");
+      await expect.poll(() => [a.text(), b.text()]).toEqual(["Please ship it today", "Please ship it today"]);
+
+      const late = await editor("cat", taskId, "stale saved text");
+      expect(late.text()).toBe("Please ship it today");
+      for (const e of [a, b, late]) e.client.close();
+    });
+
+    it("tells others to drop a caret when its owner disconnects", async () => {
+      const taskId = `t-${nanoid(6)}`;
+      const a = await editor("ann", taskId, "x");
+      const b = await editor("ben", taskId, "x");
+      b.client.close();
+      expect(await a.client.next("doc.peerLeft")).toMatchObject({ taskId, clientId: b.doc.clientID });
+      a.client.close();
+    });
+
+    it("expires the draft after everyone leaves; the next session starts from the saved text", async () => {
+      const taskId = `t-${nanoid(6)}`;
+      const a = await editor("ann", taskId, "v1");
+      a.doc.getText("description").insert(2, " draft");
+      await new Promise((r) => setTimeout(r, 100));
+      a.client.close();
+      await new Promise((r) => setTimeout(r, 2500)); // docTtlSeconds: 2
+
+      const b = await editor("ben", taskId, "v2 (saved)");
+      expect(b.text()).toBe("v2 (saved)");
+      expect(b.generation).not.toBe(a.generation);
+      b.client.close();
+    });
+
+    it("refuses edits aimed at an old draft and resyncs the sender instead", async () => {
+      const taskId = `t-${nanoid(6)}`;
+      const a = await editor("ann", taskId, "abc");
+      a.client.send({ type: "doc.update", taskId, generation: "stale", update: b64(Y.encodeStateAsUpdate(new Y.Doc())) });
+      expect((await a.client.next("doc.sync")).generation).toBe(a.generation);
+      a.client.close();
+    });
   });
 });

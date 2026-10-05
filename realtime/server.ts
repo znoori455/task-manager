@@ -18,6 +18,7 @@ import Redis from "ioredis";
 import { nanoid } from "nanoid";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { userKey } from "../src/domain/mentions";
+import { createDocRooms, DOC_CHANNEL_PREFIX } from "./docs";
 import { clientMessageSchema, type CursorUpdate, type NotificationView, type NotifyPayload, type EditableField, type Peer, type ServerMessage } from "../src/contract/realtime";
 
 const SESSION_COOKIE = "tf_user";
@@ -41,6 +42,8 @@ interface Conn {
   tokens: number;
   tokensAt: number;
   alive: boolean;
+  /** Shared description drafts this connection has open: taskId -> Yjs client id. */
+  docs: Map<string, number>;
 }
 
 type ProjectMessage =
@@ -64,6 +67,8 @@ export interface RealtimeOptions {
    * ALLOWED_ORIGINS is unset) accepts any http://localhost:* or 127.0.0.1:* origin.
    */
   allowedOrigins: string[] | "localhost";
+  /** How long a shared description draft survives after its last participant leaves. */
+  docTtlSeconds?: number;
 }
 
 const keys = {
@@ -142,8 +147,22 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
 
   // ---------- fan-out from Redis to local connections ----------
 
+  const docs = createDocRooms({
+    redis,
+    retain,
+    release,
+    send: (connId, msg, droppable) => {
+      const conn = conns.get(connId);
+      if (conn) send(conn, msg, droppable);
+    },
+    ttlSeconds: opts.docTtlSeconds ?? 60,
+    isClosing: () => closing,
+  });
+
   sub.on("message", (channel: string, raw: string) => {
-    if (channel.startsWith("rt:project:")) {
+    if (channel.startsWith(DOC_CHANNEL_PREFIX)) {
+      docs.onChannelMessage(channel, raw);
+    } else if (channel.startsWith("rt:project:")) {
       const projectId = channel.slice("rt:project:".length);
       const msg = JSON.parse(raw) as ProjectMessage;
       for (const conn of inProject(projectId)) {
@@ -241,6 +260,7 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
 
   // Refresh this instance's presence entries, and expire peers of crashed instances.
   const heartbeatTimer = setInterval(async () => {
+    await docs.heartbeat().catch(logRedisError);
     const projects = new Set<string>();
     for (const conn of conns.values()) {
       if (typeof conn.room === "object" && conn.room) {
@@ -264,7 +284,8 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
     }
     res.writeHead(404).end();
   });
-  const wss = new WebSocketServer({ noServer: true, maxPayload: 16 * 1024 });
+  // Large enough for a shared draft's initial state; everything else is tiny.
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
   http.on("upgrade", (req, socket, head) => {
     const reject = (status: number, reason: string) => {
@@ -279,7 +300,7 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
   });
 
   function onConnection(ws: WebSocket, name: string) {
-    const conn: Conn = { id: nanoid(10), name, ws, room: null, taskId: null, field: null, tokens: RATE.capacity, tokensAt: Date.now(), alive: true };
+    const conn: Conn = { id: nanoid(10), name, ws, room: null, taskId: null, field: null, tokens: RATE.capacity, tokensAt: Date.now(), alive: true, docs: new Map() };
     conns.set(conn.id, conn);
     retain(keys.notifyChannel(userKey(name)));
     send(conn, { type: "welcome", connId: conn.id, name });
@@ -292,6 +313,7 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
       if (closing) return;
       release(keys.notifyChannel(userKey(name)));
       void leaveRoom(conn).catch(() => {});
+      for (const taskId of [...conn.docs.keys()]) void docs.leave(conn, taskId).catch(logRedisError);
     });
   }
 
@@ -347,6 +369,18 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
           keys.projectChannel(projectId),
           JSON.stringify({ kind: "typing", connId: conn.id, name: conn.name, taskId: msg.taskId, typing: msg.typing } satisfies ProjectMessage),
         );
+        return;
+      case "doc.join":
+        await docs.join(conn, msg.taskId, msg.seed, msg.clientId);
+        return;
+      case "doc.update":
+        await docs.update(conn, msg.taskId, msg.generation, msg.update);
+        return;
+      case "doc.awareness":
+        await docs.awareness(conn, msg.taskId, msg.update);
+        return;
+      case "doc.leave":
+        await docs.leave(conn, msg.taskId);
         return;
     }
   }

@@ -3,6 +3,17 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { setupHeaders } from "./helpers";
 
+/** The editor's text, without other people's caret labels (which render inline in the DOM). */
+function editorText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const content = document.querySelector("[data-testid=collab-description] .cm-content");
+    if (!content) return "";
+    const copy = content.cloneNode(true) as HTMLElement;
+    copy.querySelectorAll(".cm-ySelectionCaret, .cm-ySelectionInfo, .cm-widgetBuffer").forEach((n) => n.remove());
+    return copy.innerText.replace(/\u2060/g, "").trim();
+  });
+}
+
 async function userPage(browser: Browser, name: string, baseURL: string): Promise<Page> {
   const context = await browser.newContext();
   await context.addCookies([{ name: "tf_user", value: name, url: baseURL }]);
@@ -101,3 +112,45 @@ test("notifications can be marked read, dismissed and cleared, and other tabs fo
   expect((await res.json()).notifications).toEqual([]);
 });
 
+
+test("two people edit a description together: text merges live, carets show, and it's saved", async ({ browser, baseURL, request }) => {
+  const stamp = Date.now();
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e-collab ${stamp}` }, headers })).json();
+  const taskId = `${project.id}-doc`;
+  await request.post(`/api/projects/${project.id}/commands`, {
+    data: { clientMutationId: "seed", command: { type: "task.create", task: { id: taskId, title: "Write the spec", configuration: { description: "Goals." } } } },
+    headers,
+  });
+
+  const open = async (name: string) => {
+    const page = await userPage(browser, name, baseURL!);
+    await page.goto(`/projects/${project.id}?task=${taskId}`);
+    const editor = page.getByTestId("collab-description").locator(".cm-content");
+    await expect(editor).toHaveText("Goals.");
+    return { page, editor };
+  };
+  const ann = await open(`ann${stamp}`);
+  const ben = await open(`ben${stamp}`);
+
+  // Ann appends; Ben prepends. Both edits merge in both editors.
+  await ann.editor.click();
+  await ann.page.keyboard.press("End");
+  await ann.page.keyboard.type(" Non-goals.");
+  await ben.editor.click();
+  await ben.page.keyboard.press("Home");
+  await ben.page.keyboard.type("Spec: ");
+  const merged = "Spec: Goals. Non-goals.";
+  for (const p of [ann.page, ben.page]) await expect.poll(() => editorText(p)).toBe(merged);
+
+  // Each sees the other's caret, labelled with their name.
+  await expect(ann.page.locator(".cm-ySelectionInfo")).toHaveText(`ben${stamp}`);
+  await expect(ben.page.locator(".cm-ySelectionInfo")).toHaveText(`ann${stamp}`);
+
+  // Autosaved through the normal pipeline: the server has the merged text, and a reload shows it.
+  await expect
+    .poll(async () => (await (await request.get(`/api/projects/${project.id}/tasks?ids=${taskId}`)).json()).tasks[0].configuration.description)
+    .toBe(merged);
+  await ann.page.reload();
+  await expect.poll(() => editorText(ann.page)).toBe(merged);
+});
