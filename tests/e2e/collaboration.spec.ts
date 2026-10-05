@@ -2,6 +2,22 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { setupHeaders } from "./helpers";
 
+/**
+ * Answer the next dialog from a handler registered *before* the action that opens it.
+ * (Awaiting the click first can deadlock: if the dialog opens before Playwright
+ * finishes the click, the click waits for the dialog to be handled.) Resolves
+ * with the dialog's message once it has been answered.
+ */
+function answerNextDialog(page: Page, accept: boolean): Promise<string> {
+  return new Promise((resolve) =>
+    page.once("dialog", async (d) => {
+      const message = d.message();
+      await (accept ? d.accept() : d.dismiss());
+      resolve(message);
+    }),
+  );
+}
+
 async function userPage(browser: Browser, name: string, baseURL: string): Promise<Page> {
   const context = await browser.newContext();
   await context.addCookies([{ name: "tf_user", value: name, url: baseURL }]);
@@ -89,19 +105,22 @@ test("switching users with unsynced offline edits asks before discarding them", 
   await expect(page.getByText("1 unsynced")).toBeVisible();
 
   // Cancel: nothing changes, the edit is still queued.
-  page.once("dialog", (d) => {
-    expect(d.message()).toContain("1 unsynced change");
-    void d.dismiss();
-  });
   await page.getByTestId("user-menu").click();
+  let answered = answerNextDialog(page, false);
   await page.getByRole("button", { name: "Switch user" }).click();
+  expect(await answered).toContain("1 unsynced change");
+  await expect(page.getByRole("button", { name: "Switch user" })).toBeHidden();
   await expect(page.getByText("1 unsynced")).toBeVisible();
 
-  // Confirm: the edit is discarded and carol is signed out (cleared locally while offline).
-  page.once("dialog", (d) => void d.accept());
+  // Confirm: the edit is discarded and carol is signed out.
   await page.getByTestId("user-menu").click();
+  answered = answerNextDialog(page, true);
   await page.getByRole("button", { name: "Switch user" }).click();
+  await answered;
+  // Offline, the session cookie is cleared in the browser.
+  await expect.poll(async () => (await page.context().cookies()).some((c) => c.name === "tf_user")).toBe(false);
   await page.context().setOffline(false);
+  await page.reload();
   await expect(page.getByPlaceholder("e.g. alice")).toBeVisible();
   await page.getByPlaceholder("e.g. alice").fill("dave");
   await page.getByRole("button", { name: "Continue" }).click();
