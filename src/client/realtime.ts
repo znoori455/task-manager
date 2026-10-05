@@ -40,6 +40,30 @@ let syncHandler: ((change: { read?: string[] | "all"; removed?: string[] | "all"
 let reconnectHandler: (() => void) | null = null;
 let everConnected = false;
 
+/** Handlers for open shared drafts (see collab.ts), by task id. */
+export interface DocHandler {
+  onSync: (generation: string, state: string) => void;
+  onUpdate: (update: string) => void;
+  onAwareness: (update: string) => void;
+  onPeerLeft: (clientId: number) => void;
+  /** The socket reconnected: rejoin the draft. */
+  onReconnect: () => void;
+}
+const docHandlers = new Map<string, DocHandler>();
+
+export function registerDoc(taskId: string, handler: DocHandler): () => void {
+  docHandlers.set(taskId, handler);
+  return () => {
+    if (docHandlers.get(taskId) === handler) docHandlers.delete(taskId);
+  };
+}
+
+export function sendDoc(msg: Extract<ClientMessage, { type: `doc.${string}` }>) {
+  send(msg);
+}
+
+export const isRealtimeLive = () => ws?.readyState === WebSocket.OPEN;
+
 // Hot reload in dev re-runs this module; without this, the previous copy's
 // socket would keep reconnecting forever (one more zombie per edit).
 const g = globalThis as unknown as { __taskflowRealtime?: { dispose: () => void } };
@@ -93,6 +117,7 @@ function connect() {
     set({ status: "live" });
     if (room) send({ type: "join", room });
     if (room && room !== "lobby" && selection.taskId) send({ type: "select", ...selection });
+    for (const handler of docHandlers.values()) handler.onReconnect();
     // Notifications are loaded at startup; refetch only after a reconnect (we may have missed some).
     if (everConnected) reconnectHandler?.();
     everConnected = true;
@@ -138,6 +163,14 @@ function receive(msg: ServerMessage) {
       return notificationHandler?.(msg.notification);
     case "notifications.sync":
       return syncHandler?.({ read: msg.read, removed: msg.removed });
+    case "doc.sync":
+      return docHandlers.get(msg.taskId)?.onSync(msg.generation, msg.state);
+    case "doc.update":
+      return docHandlers.get(msg.taskId)?.onUpdate(msg.update);
+    case "doc.awareness":
+      return docHandlers.get(msg.taskId)?.onAwareness(msg.update);
+    case "doc.peerLeft":
+      return docHandlers.get(msg.taskId)?.onPeerLeft(msg.clientId);
     case "error":
       console.warn("[realtime]", msg.message);
   }

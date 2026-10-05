@@ -3,6 +3,17 @@
 import { expect, test, type Browser, type Page } from "@playwright/test";
 import { setupHeaders } from "./helpers";
 
+/** The editor's text, without other people's caret labels (which render inline in the DOM). */
+function editorText(page: Page): Promise<string> {
+  return page.evaluate(() => {
+    const content = document.querySelector("[data-testid=collab-description] .cm-content");
+    if (!content) return "";
+    const copy = content.cloneNode(true) as HTMLElement;
+    copy.querySelectorAll(".cm-ySelectionCaret, .cm-ySelectionInfo, .cm-widgetBuffer").forEach((n) => n.remove());
+    return copy.innerText.replace(/\u2060/g, "").trim();
+  });
+}
+
 async function userPage(browser: Browser, name: string, baseURL: string): Promise<Page> {
   const context = await browser.newContext();
   await context.addCookies([{ name: "tf_user", value: name, url: baseURL }]);
@@ -101,3 +112,123 @@ test("notifications can be marked read, dismissed and cleared, and other tabs fo
   expect((await res.json()).notifications).toEqual([]);
 });
 
+
+test("two people edit a description together: text merges live, carets show, and it's saved", async ({ browser, baseURL, request }) => {
+  const stamp = Date.now();
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e-collab ${stamp}` }, headers })).json();
+  const taskId = `${project.id}-doc`;
+  await request.post(`/api/projects/${project.id}/commands`, {
+    data: { clientMutationId: "seed", command: { type: "task.create", task: { id: taskId, title: "Write the spec", configuration: { description: "Goals." } } } },
+    headers,
+  });
+
+  const open = async (name: string) => {
+    const page = await userPage(browser, name, baseURL!);
+    await page.goto(`/projects/${project.id}?task=${taskId}`);
+    const editor = page.getByTestId("collab-description").locator(".cm-content");
+    await expect(editor).toHaveText("Goals.");
+    return { page, editor };
+  };
+  const ann = await open(`ann${stamp}`);
+  const ben = await open(`ben${stamp}`);
+
+  // Ann appends; Ben prepends. Both edits merge in both editors.
+  await ann.editor.click();
+  await ann.page.keyboard.press("End");
+  await ann.page.keyboard.type(" Non-goals.");
+  await ben.editor.click();
+  await ben.page.keyboard.press("Home");
+  await ben.page.keyboard.type("Spec: ");
+  const merged = "Spec: Goals. Non-goals.";
+  for (const p of [ann.page, ben.page]) await expect.poll(() => editorText(p)).toBe(merged);
+
+  // Each sees the other's caret, labelled with their name.
+  await expect(ann.page.locator(".cm-ySelectionInfo")).toHaveText(`ben${stamp}`);
+  await expect(ben.page.locator(".cm-ySelectionInfo")).toHaveText(`ann${stamp}`);
+
+  // Autosaved through the normal pipeline: the server has the merged text, and a reload shows it.
+  await expect
+    .poll(async () => (await (await request.get(`/api/projects/${project.id}/tasks?ids=${taskId}`)).json()).tasks[0].configuration.description)
+    .toBe(merged);
+  await ann.page.reload();
+  await expect.poll(() => editorText(ann.page)).toBe(merged);
+});
+
+const REALTIME_WS = `ws://localhost:${process.env.E2E_REALTIME_PORT ?? 3001}/ws`;
+
+async function projectWithTask(request: import("@playwright/test").APIRequestContext, title: string, description = "") {
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e ${title} ${Date.now()}` }, headers })).json();
+  const taskId = `${project.id}-t`;
+  await request.post(`/api/projects/${project.id}/commands`, {
+    data: { clientMutationId: "seed", command: { type: "task.create", task: { id: taskId, title, configuration: { description } } } },
+    headers,
+  });
+  return { projectId: project.id as string, taskId, headers };
+}
+
+test("fast typing in a shared description arrives in full, without dropping the connection", async ({ browser, baseURL, request }) => {
+  const stamp = Date.now();
+  const { projectId, taskId } = await projectWithTask(request, "Burst");
+  const open = async (name: string) => {
+    const page = await userPage(browser, name, baseURL!);
+    // Record WebSocket closes (the service closes floods with code 1008).
+    await page.addInitScript(() => {
+      (window as unknown as { __closes: number[] }).__closes = [];
+      const Orig = window.WebSocket;
+      window.WebSocket = class extends Orig {
+        constructor(...args: ConstructorParameters<typeof WebSocket>) {
+          super(...args);
+          this.addEventListener("close", (e) => (window as unknown as { __closes: number[] }).__closes.push(e.code));
+        }
+      } as typeof WebSocket;
+    });
+    await page.goto(`/projects/${projectId}?task=${taskId}`);
+    await expect(page.getByTestId("collab-description").locator(".cm-content")).toBeVisible();
+    return page;
+  };
+  const typist = await open(`fast${stamp}`);
+  const reader = await open(`reader${stamp}`);
+
+  const burst = "lorem ipsum dolor sit amet ".repeat(15).trim(); // ~400 keystrokes, no delay
+  await typist.getByTestId("collab-description").locator(".cm-content").click();
+  await typist.keyboard.type(burst);
+
+  await expect.poll(() => editorText(reader), { timeout: 5000 }).toBe(burst);
+  expect(await typist.evaluate(() => (window as unknown as { __closes: number[] }).__closes)).not.toContain(1008);
+});
+
+test("a panel opened while the realtime service is unreachable upgrades to live editing once it's back", async ({ browser, baseURL, request }) => {
+  const { projectId, taskId } = await projectWithTask(request, "Upgrade", "Start.");
+  const page = await userPage(browser, `late${Date.now()}`, baseURL!);
+  let blocked = true;
+  await page.routeWebSocket(REALTIME_WS, (ws) => {
+    if (blocked) ws.close();
+    else ws.connectToServer();
+  });
+  await page.goto(`/projects/${projectId}?task=${taskId}`);
+  const panel = page.getByTestId("task-panel");
+  await expect(panel.getByPlaceholder("Add a description…")).toHaveValue("Start.");
+  await expect(panel.getByText(/Co-editing is reconnecting/)).toBeVisible();
+
+  blocked = false; // the client retries with backoff
+  await expect(page.getByTestId("collab-description").locator(".cm-content")).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => editorText(page)).toBe("Start.");
+});
+
+test("a focused field still shows other people's changes until you start typing", async ({ browser, baseURL, request }) => {
+  const { projectId, taskId, headers } = await projectWithTask(request, "Original title");
+  const page = await userPage(browser, `focus${Date.now()}`, baseURL!);
+  await page.goto(`/projects/${projectId}?task=${taskId}`);
+  const title = page.getByTestId("task-panel").getByRole("textbox").first();
+  await expect(title).toHaveValue("Original title");
+  await title.focus();
+
+  await request.post(`/api/projects/${projectId}/commands`, {
+    data: { clientMutationId: "rename", command: { type: "task.update", taskId, patch: { title: "Renamed by someone else" } } },
+    headers,
+  });
+  await expect(title).toHaveValue("Renamed by someone else");
+  await expect(title).toBeFocused();
+});

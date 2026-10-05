@@ -40,10 +40,10 @@ test("offline edits sync on reconnect, and missed remote changes are caught up",
   await expect(page.getByTestId("task-row").filter({ hasText: "bob found the cause" })).toBeVisible();
   await expect(page.getByText("Live")).toBeVisible();
 
-  // The server has alice's offline edits.
-  const { tasks } = await (await request.get(`/api/projects/${project.id}/tasks?limit=10`)).json();
-  expect(tasks.map((t: { title: string }) => t.title)).toContain("Drafted on a plane");
-  expect(tasks.find((t: { id: string }) => t.id === `${project.id}-a`).status).toBe("in_progress");
+  // The server gets alice's offline edits (sent from her queue right after reconnecting).
+  const serverTasks = async () => (await (await request.get(`/api/projects/${project.id}/tasks?limit=10`)).json()).tasks as { id: string; title: string; status: string }[];
+  await expect.poll(async () => (await serverTasks()).map((t) => t.title)).toContain("Drafted on a plane");
+  await expect.poll(async () => (await serverTasks()).find((t) => t.id === `${project.id}-a`)?.status).toBe("in_progress");
 });
 
 test("conflicting offline edits are rolled back on reconnect", async ({ browser, baseURL, request }) => {

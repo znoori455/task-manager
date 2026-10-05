@@ -82,6 +82,7 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
 - **Option 2, Advanced collaboration:**
   - presence: who's in each project (shown on the project list too) and which task they have open. It's tied to the WebSocket connection, so joins and leaves show instantly,
   - live cursors pinned to tasks, plus shared selection: a colored outline on the task someone has open, "bob is editing…" on fields, "bob is typing…" in comments,
+  - shared live editing of task descriptions: several people type in the same description at once, with everyone's named caret shown ([how](#shared-description-editing)),
   - a live activity feed, plus notifications: a bell with unread count across all projects, delivered instantly,
   - @mentions with notifications, detected on the server and saved, so you see them even if you were offline. Assignment, comments and status changes on your tasks notify you too.
 - **Option 4, partly:**
@@ -244,6 +245,34 @@ runs alongside the app; it's TypeScript so it shares the message contract
 - **Scaling:** no sticky sessions needed. Every instance subscribes to Redis
   channels only for rooms its own connections are in.
 
+### Shared description editing
+
+A task's description is edited live together (Yjs, a CRDT text library, with
+the CodeMirror editor). The shared document is a **draft**; the saved
+description is still a normal command in the event log.
+
+- **Where drafts live:** on the WebSocket service, backed by Redis
+  (`realtime/docs.ts`). Edits are small Yjs updates, relayed to other
+  instances via pub/sub and appended to a Redis list so late joiners get the
+  current text. The list is merged periodically, and the draft expires ~60 s
+  after the last person leaves, so the next session starts from the saved text.
+- **Seeded exactly once:** each joiner offers the saved description as the
+  starting text, and a Redis lock makes sure only one becomes the draft. Two
+  people seeding at the same moment would otherwise duplicate the text.
+- **Generations:** each draft gets an id. A client still holding an expired
+  draft (e.g. after a long disconnect) is told to start over instead of merging
+  into the new one, which would also duplicate text.
+- **Saving:** whoever typed autosaves the full text through
+  `POST /commands` 1.5 s after they stop typing, and immediately on blur or
+  close. The event log, activity feed, other clients' lists and offline
+  catch-up all work unchanged.
+- **Undo:** ⌘Z in the editor undoes only your own typing. Autosaves stay off
+  the app-wide undo stack.
+- **Offline:** if the realtime connection isn't up when the task opens, the
+  plain editor is used and saves queue like any other edit. The editor code is
+  lazy-loaded (and preloaded when a project opens), and a failed download
+  falls back to the plain editor.
+
 ### Notifications
 
 - **Generated inside the write transaction** from the same before/after state
@@ -397,8 +426,10 @@ What's built (one region, N stateless app instances) and the next steps:
     workflow), and gives every client the same history.
   - Downside: offline edits are tentative until the server accepts them.
     Conflicting ones are rolled back rather than merged. Concurrent edits to
-    the *same* text field are last-writer-wins, not merged character by
-    character. The next step would be Yjs for the description field only.
+    the *same* field are last-writer-wins, except descriptions, which are
+    merged character by character while people edit together (Yjs). A
+    description change made outside the shared editor during a live session
+    is overwritten by the next autosave.
 - **Per-project row lock.** Simple and correct (gap-free seq, serialized
   invariant checks) at the cost of throughput per project; see scaling point 5.
 - **Read model and log written in one transaction.** No eventual-consistency
@@ -502,10 +533,11 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `cache.ts` | IndexedDB persistence |
 | ├─ `projects.ts` | Project list state, lobby stream and catch-up |
 | ├─ `realtime.ts` | WebSocket connection: presence, cursors, selection, typing; reconnects and rejoins |
+| ├─ `collab.ts` | One shared description draft (Yjs doc, carets, resync after reconnect) |
 | └─ `notifications.ts` | Notification list, unread count, toasts |
-| `realtime/` | **The WebSocket service** (`server.ts`, `main.ts`): rooms, presence, cursor batching, backpressure, notification forwarding |
+| `realtime/` | **The WebSocket service**: `server.ts` (rooms, presence, cursor batching, backpressure, notification forwarding), `docs.ts` (shared description drafts), `main.ts` |
 | `src/app/api/` | Thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint |
-| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments), `Collaboration` (cursors, selection, typing), `NotificationBell` |
+| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments), `Collaboration` (cursors, selection, typing), `CollabDescription` (shared editor), `NotificationBell` |
 | `drizzle/` | SQL migrations, generated by `npm run db:generate` (0004 adds `notifications`). Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
 | `scripts/` | `migrate.ts`, `seed.ts` |
 | `tests/` | `unit/` (domain, notification rules), `integration/` (write path, catch-up, notifications and the WebSocket service on real Postgres/Redis), `e2e/` (two-browser collaboration, live cursors/presence/notifications, offline) |

@@ -10,6 +10,7 @@ import { STATUS_LABELS, blockingDependencies, canTransition } from "@/domain/rul
 import { PRIORITIES, TASK_STATUSES, type Comment, type Priority, type Task, type TaskStatus } from "@/domain/types";
 import { sendSelect, sendTyping } from "@/client/realtime";
 import { EditingBy, TypingIndicator, usePeersOnTask } from "./Collaboration";
+import { DescriptionField } from "./DescriptionField";
 import { EditableText } from "./EditableText";
 import { Avatar, StatusBadge, Tag, timeAgo } from "./ui";
 
@@ -114,13 +115,7 @@ export function TaskPanel({ taskId }: { taskId: string }) {
         </Field>
 
         <Field label="Description" extra={<EditingBy taskId={taskId} field="description" />}>
-          <EditableText
-            multiline
-            value={task.configuration.description}
-            placeholder="Add a description…"
-            onEditing={(on) => sendSelect(taskId, on ? "description" : null)}
-            onCommit={(description) => update({ description })}
-          />
+          <DescriptionField taskId={taskId} value={task.configuration.description} />
         </Field>
 
         <Field label="Custom fields">
