@@ -18,7 +18,7 @@ import Redis from "ioredis";
 import { nanoid } from "nanoid";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { userKey } from "../src/domain/mentions";
-import { clientMessageSchema, type CursorUpdate, type EditableField, type Peer, type ServerMessage } from "../src/contract/realtime";
+import { clientMessageSchema, type CursorUpdate, type NotificationView, type NotifyPayload, type EditableField, type Peer, type ServerMessage } from "../src/contract/realtime";
 
 const SESSION_COOKIE = "tf_user";
 const CURSOR_FLUSH_MS = 66;
@@ -106,6 +106,9 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
   for (const c of [redis, sub]) c.on("error", (e: Error) => console.error("[realtime][redis]", e.message));
 
   const conns = new Map<string, Conn>();
+  /** Set by close(): stop issuing Redis commands from socket events, so nothing races the disconnect. */
+  let closing = false;
+  const logRedisError = (e: Error) => !closing && console.error("[realtime][redis]", e.message);
   /** Local subscriptions, ref-counted: channel -> number of local connections needing it. */
   const subscriptions = new Map<string, number>();
   /** Newest cursor per connection, per project, waiting for the next flush. */
@@ -114,14 +117,14 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
   const retain = (channel: string) => {
     const n = subscriptions.get(channel) ?? 0;
     subscriptions.set(channel, n + 1);
-    if (n === 0) void sub.subscribe(channel);
+    if (n === 0) sub.subscribe(channel).catch(logRedisError);
   };
   const release = (channel: string) => {
     const n = (subscriptions.get(channel) ?? 0) - 1;
     if (n > 0) subscriptions.set(channel, n);
     else {
       subscriptions.delete(channel);
-      void sub.unsubscribe(channel);
+      if (!closing) sub.unsubscribe(channel).catch(logRedisError);
     }
   };
 
@@ -155,7 +158,12 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
       for (const conn of conns.values()) if (conn.room === "lobby") send(conn, { type: "lobby", projects });
     } else if (channel.startsWith("notify:")) {
       const user = channel.slice("notify:".length);
-      for (const conn of conns.values()) if (userKey(conn.name) === user) send(conn, { type: "notification", notification: JSON.parse(raw) });
+      const parsed = JSON.parse(raw) as NotifyPayload | NotificationView;
+      // Older app versions published a bare NotificationView; accept both so a rolling deploy doesn't drop notifications.
+      const payload: NotifyPayload = "kind" in parsed ? parsed : { kind: "new", notification: parsed };
+      const msg: ServerMessage =
+        payload.kind === "new" ? { type: "notification", notification: payload.notification } : { type: "notifications.sync", read: payload.read, removed: payload.removed };
+      for (const conn of conns.values()) if (userKey(conn.name) === user) send(conn, msg);
     }
   });
 
@@ -227,7 +235,7 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
       if (!byConn.size) continue;
       const updates = [...byConn.values()];
       byConn.clear();
-      void redis.publish(keys.projectChannel(projectId), JSON.stringify({ kind: "cursors", updates } satisfies ProjectMessage));
+      redis.publish(keys.projectChannel(projectId), JSON.stringify({ kind: "cursors", updates } satisfies ProjectMessage)).catch(logRedisError);
     }
   }, CURSOR_FLUSH_MS);
 
@@ -280,6 +288,8 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
     ws.on("message", (data: RawData) => void onMessage(conn, data).catch((e) => console.error("[realtime]", e)));
     ws.on("close", () => {
       conns.delete(conn.id);
+      // During shutdown, close() cleans up presence itself (before disconnecting Redis).
+      if (closing) return;
       release(keys.notifyChannel(userKey(name)));
       void leaveRoom(conn).catch(() => {});
     });
@@ -360,6 +370,7 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
   return {
     port,
     async close() {
+      closing = true;
       clearInterval(flushTimer);
       clearInterval(heartbeatTimer);
       clearInterval(pingTimer);

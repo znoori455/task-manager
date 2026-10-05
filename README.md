@@ -259,6 +259,10 @@ runs alongside the app; it's TypeScript so it shares the message contract
 - **Never lost:** the list and unread count come from Postgres
   (`GET /api/notifications`), and the browser refetches after every reconnect.
   Live delivery is a speed-up, not the source of truth.
+- **Managing them:** mark all read (`POST /api/notifications/read`), dismiss
+  one (`DELETE /api/notifications/:id`) or clear all
+  (`DELETE /api/notifications`). Each change is published on the same per-user
+  channel, so the user's other open tabs update too.
 
 ### Offline and catch-up
 
@@ -460,7 +464,7 @@ npm run realtime       # WebSocket service on :3001 (separate terminal)
 | Command | |
 | --- | --- |
 | `npm test` | Unit tests (domain) + integration tests (needs db/redis running) |
-| `npm run test:e2e` | Playwright: two browsers collaborating (sync, cursors, presence, typing, notifications), offline edits. Starts a dev server on :3100 and the realtime service on :3001; use `E2E_PORT=3000` to reuse a running app. With `CI=1` it runs against `next start` and includes the offline-reload test |
+| `npm run test:e2e` | Playwright: two browsers collaborating (sync, cursors, presence, typing, notifications), offline edits. Starts a dev server on :3100 and the realtime service on :3001; use `E2E_PORT=3000` to reuse a running app. With `CI=1` it runs against `next start` and includes the offline-reload test. To run next to the Docker stack (which holds :3001), set `E2E_REALTIME_PORT=3002` and build with `NEXT_PUBLIC_REALTIME_URL=ws://localhost:3002/ws` |
 | `npm run typecheck` / `npm run lint` | |
 | `npm run db:generate` | New migration from `src/server/db/schema.ts` |
 | `npx tsx load/fanout.ts <projectId>` | SSE fan-out latency test |

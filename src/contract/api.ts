@@ -27,6 +27,8 @@ export interface Api {
   "GET /api/projects/:id/tasks/:taskId/comments": { res: { comments: Comment[] } };
   "GET /api/notifications": { res: { notifications: NotificationView[]; unread: number } };
   "POST /api/notifications/read": { body: { ids?: string[] }; res: { unread: number } };
+  "DELETE /api/notifications": { res: { unread: number } };
+  "DELETE /api/notifications/:id": { res: { unread: number } };
 }
 
 export interface TaskPage {

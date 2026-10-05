@@ -2,6 +2,7 @@ import { and, count, desc, eq, inArray, isNull, lt } from "drizzle-orm";
 import type { NotificationView } from "@/contract/realtime";
 import { userKey } from "@/domain/mentions";
 import { db, tables } from "./db";
+import { channels, publish } from "./redis";
 
 const { notifications } = tables;
 
@@ -32,11 +33,24 @@ export async function listNotifications(user: string, before: string | null, lim
   return { notifications: rows.map(toView), unread: await unreadCount(recipient) };
 }
 
+/** Tell the user's other tabs (via the realtime service) to apply the same change. */
+const syncOtherTabs = (recipient: string, change: { read?: string[] | "all"; removed?: string[] | "all" }) =>
+  publish(channels.notify(recipient), { kind: "sync", ...change }).catch(() => {});
+
 export async function markRead(user: string, ids?: string[]) {
   const recipient = userKey(user);
   await db
     .update(notifications)
     .set({ readAt: new Date().toISOString() })
     .where(and(eq(notifications.recipient, recipient), isNull(notifications.readAt), ids ? inArray(notifications.id, ids) : undefined));
+  await syncOtherTabs(recipient, { read: ids ?? "all" });
+  return { unread: await unreadCount(recipient) };
+}
+
+/** Delete notifications (all of them when `ids` is omitted). Only ever the user's own. */
+export async function removeNotifications(user: string, ids?: string[]) {
+  const recipient = userKey(user);
+  await db.delete(notifications).where(and(eq(notifications.recipient, recipient), ids ? inArray(notifications.id, ids) : undefined));
+  await syncOtherTabs(recipient, { removed: ids ?? "all" });
   return { unread: await unreadCount(recipient) };
 }

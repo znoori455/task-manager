@@ -122,9 +122,13 @@ describe("realtime service", () => {
     await Promise.all([tab1.next("welcome"), tab2.next("welcome")]);
     await new Promise((r) => setTimeout(r, 50)); // subscription settles
     // Channels are keyed by the lowercased display name.
-    await redis.publish(`notify:${name.toLowerCase()}`, JSON.stringify({ id: "n1", type: "mention" }));
+    await redis.publish(`notify:${name.toLowerCase()}`, JSON.stringify({ kind: "new", notification: { id: "n1", type: "mention" } }));
     expect((await tab1.next("notification")).notification).toMatchObject({ id: "n1" });
     expect((await tab2.next("notification")).notification).toMatchObject({ id: "n1" });
+    // Read/clear in one tab is mirrored to the others.
+    await redis.publish(`notify:${name.toLowerCase()}`, JSON.stringify({ kind: "sync", removed: ["n1"] }));
+    expect(await tab1.next("notifications.sync")).toMatchObject({ removed: ["n1"] });
+    expect(await tab2.next("notifications.sync")).toMatchObject({ removed: ["n1"] });
     tab1.close();
     tab2.close();
   });

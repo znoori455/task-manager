@@ -199,6 +199,14 @@ export function openApiDocument() {
           ],
           responses: { 200: ok({ type: "object", properties: { notifications: { type: "array", items: { type: "object" } }, unread: { type: "integer" } } }), ...errors },
         },
+        delete: { summary: "Clear all of your notifications", responses: { 200: ok({ type: "object", properties: { unread: { type: "integer" } } }), ...errors } },
+      },
+      "/api/notifications/{notificationId}": {
+        delete: {
+          summary: "Remove one of your notifications",
+          parameters: [{ name: "notificationId", in: "path", required: true, schema: { type: "string" } }],
+          responses: { 200: ok({ type: "object", properties: { unread: { type: "integer" } } }), ...errors },
+        },
       },
       "/api/notifications/read": {
         post: {

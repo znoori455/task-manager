@@ -59,3 +59,45 @@ test("presence, cursors, selection, typing and notifications are shared live", a
   await b.close();
   await expect(a.getByTestId("presence").getByTitle(bob)).toHaveCount(0);
 });
+
+test("notifications can be marked read, dismissed and cleared, and other tabs follow", async ({ browser, baseURL, request }) => {
+  const stamp = Date.now();
+  const me = `erin${stamp}`;
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e-notify ${stamp}` }, headers })).json();
+  const cmd = (id: string, command: object) => request.post(`/api/projects/${project.id}/commands`, { data: { clientMutationId: id, command }, headers });
+  await cmd("t", { type: "task.create", task: { id: `${project.id}-a`, title: "Review" } });
+  for (const i of [1, 2, 3]) await cmd(`c${i}`, { type: "comment.add", comment: { id: `${project.id}-c${i}`, taskId: `${project.id}-a`, content: `@${me} note ${i}` } });
+
+  // Two tabs of the same user.
+  const context = await browser.newContext();
+  await context.addCookies([{ name: "tf_user", value: me, url: baseURL! }]);
+  const [tab1, tab2] = [await context.newPage(), await context.newPage()];
+  await Promise.all([tab1.goto("/"), tab2.goto("/")]);
+  for (const tab of [tab1, tab2]) await expect(tab.getByTestId("unread-count")).toHaveText("3");
+  // Wait until tab2's live connection is up, so it receives the sync messages.
+  await expect.poll(() => tab2.evaluate(() => document.querySelectorAll("[data-testid=project-list]").length)).toBe(1);
+  await tab2.waitForTimeout(500);
+
+  // Mark all read: badge disappears in both tabs, the items stay.
+  await tab1.getByTestId("notification-bell").click();
+  await tab1.getByRole("button", { name: "Mark all read" }).click();
+  for (const tab of [tab1, tab2]) await expect(tab.getByTestId("unread-count")).toHaveCount(0);
+  await expect(tab1.getByTestId("notification")).toHaveCount(3);
+
+  // Dismiss one.
+  const first = tab1.getByTestId("notification").filter({ hasText: "note 3" });
+  await first.hover();
+  await first.getByRole("button", { name: "Dismiss notification" }).click();
+  await expect(tab1.getByTestId("notification")).toHaveCount(2);
+  await tab2.getByTestId("notification-bell").click();
+  await expect(tab2.getByTestId("notification")).toHaveCount(2);
+
+  // Clear all, in both tabs, and on the server.
+  await tab1.getByRole("button", { name: "Clear all" }).click();
+  await expect(tab1.getByText("No notifications.")).toBeVisible();
+  await expect(tab2.getByText("No notifications.")).toBeVisible();
+  const res = await request.get("/api/notifications", { headers: { cookie: `tf_user=${me}` } });
+  expect((await res.json()).notifications).toEqual([]);
+});
+

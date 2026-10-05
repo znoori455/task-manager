@@ -7,7 +7,7 @@ import type { Command } from "@/contract/schemas";
 import type { Project } from "@/domain/types";
 import { createProject, executeCommand } from "@/server/commands";
 import { db, pg, tables } from "@/server/db";
-import { listNotifications, markRead } from "@/server/notifications";
+import { listNotifications, markRead, removeNotifications } from "@/server/notifications";
 import { redis } from "@/server/redis";
 
 let project: Project;
@@ -17,7 +17,7 @@ const tid = `${nanoid(10)}`;
 const run = (command: Command, actor: string) => executeCommand(project.id, { clientMutationId: nanoid(), command }, actor);
 
 const sub = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
-const published: { channel: string; message: { type: string } }[] = [];
+const published: { channel: string; message: { kind: string; notification?: { type: string }; read?: unknown; removed?: unknown } }[] = [];
 
 beforeAll(async () => {
   project = await createProject({ name: "notify-test", description: "", metadata: {} }, "test", nanoid(12));
@@ -53,8 +53,8 @@ describe("notifications", () => {
 
   it("are published on the recipient's channel for live delivery", async () => {
     await new Promise((r) => setTimeout(r, 100));
-    expect(published.filter((p) => p.channel === `notify:${carol}`).map((p) => p.message.type)).toEqual(["mention"]);
-    expect(published.filter((p) => p.channel === `notify:${bob}`)).toHaveLength(3);
+    expect(published.filter((p) => p.channel === `notify:${carol}`).map((p) => p.message.notification?.type)).toEqual(["mention"]);
+    expect(published.filter((p) => p.channel === `notify:${bob}` && p.message.kind === "new")).toHaveLength(3);
   });
 
   it("can be marked read individually or all at once", async () => {
@@ -62,5 +62,24 @@ describe("notifications", () => {
     expect((await markRead(bob, [notifications[0].id])).unread).toBe(2);
     expect((await markRead(bob)).unread).toBe(0);
     expect((await listNotifications(bob, null, 10)).notifications.every((n) => n.readAt)).toBe(true);
+  });
+
+  it("can be removed one at a time or all at once, only by their owner, and other tabs are told", async () => {
+    await run({ type: "comment.add", comment: { id: nanoid(), taskId: tid, content: `@${carol} again` } }, alice);
+    const { notifications } = await listNotifications(carol, null, 10);
+    expect(notifications).toHaveLength(2);
+
+    // Someone else can't delete carol's notifications, even by id.
+    await removeNotifications(bob, [notifications[0].id]);
+    expect((await listNotifications(carol, null, 10)).notifications).toHaveLength(2);
+
+    expect((await removeNotifications(carol, [notifications[0].id])).unread).toBe(1);
+    expect((await listNotifications(carol, null, 10)).notifications.map((n) => n.id)).toEqual([notifications[1].id]);
+    expect(await removeNotifications(carol)).toEqual({ unread: 0 });
+    expect((await listNotifications(carol, null, 10)).notifications).toEqual([]);
+
+    await new Promise((r) => setTimeout(r, 100));
+    const syncs = published.filter((p) => p.channel === `notify:${carol}` && p.message.kind === "sync").map((p) => p.message.removed);
+    expect(syncs).toEqual([[notifications[0].id], "all"]);
   });
 });
