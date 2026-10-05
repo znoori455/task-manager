@@ -3,12 +3,11 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { call } from "@/client/api";
 import { useProjectFeed } from "@/client/feeds";
-import { pinProject, startProjects, useProjects } from "@/client/projects";
+import { addCreatedProject, startProjects, useProjects } from "@/client/projects";
 import { joinRoom, useRealtime } from "@/client/realtime";
 import { useStore } from "@/client/store";
 import { NotificationBell } from "./NotificationBell";
 import { UserMenu } from "./UserMenu";
-import { UpdatesPill } from "./UpdatesPill";
 import { Avatar, timeAgo } from "./ui";
 
 export function ProjectsPage() {
@@ -66,7 +65,7 @@ export function ProjectsPage() {
           setError(null);
           try {
             const { project } = await call("POST /api/projects", { body: { name, description } });
-            pinProject(project);
+            addCreatedProject(project);
             setName("");
             setDescription("");
           } catch (err) {
@@ -86,13 +85,6 @@ export function ProjectsPage() {
         <p className="text-sm text-zinc-500">{feed.isLoading ? "Loading…" : "No projects yet. Create one above."}</p>
       ) : (
         <div className="relative">
-          <UpdatesPill
-            count={feed.updates}
-            onShow={() => {
-              window.scrollTo({ top: 0 });
-              feed.showUpdates();
-            }}
-          />
           <ul className="grid gap-3 sm:grid-cols-2" data-testid="project-list">
             {feed.ids.map((id) => {
               const p = byId[id];

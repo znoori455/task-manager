@@ -60,10 +60,6 @@ interface StoreState {
   redoStack: Command[];
   toasts: Toast[];
   selectedTaskId: string | null;
-  /** Tasks created/moved by me this session; shown at the top of feeds that haven't loaded them. */
-  pinned: string[];
-  /** Task id -> seq of the last change made by someone else (drives the "N updated" pill). */
-  remoteTouched: Record<string, number>;
   /** Bumped when cached data is discarded, so feeds refetch from scratch. */
   epoch: number;
 }
@@ -81,8 +77,6 @@ const initial: Omit<StoreState, "me" | "online"> = {
   redoStack: [],
   toasts: [],
   selectedTaskId: null,
-  pinned: [],
-  remoteTouched: {},
   epoch: 0,
 };
 
@@ -106,8 +100,6 @@ let session = 0;
 let ackWatchdog: ReturnType<typeof setTimeout> | undefined;
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
 const deletedComments = new Set<string>();
-/** Mutation ids sent by this tab: their events aren't "someone else's update". */
-const mine = new Set<string>();
 /** Events for tasks we haven't loaded, held until the task's row arrives. */
 const stash = new Map<string, DomainEvent[]>();
 const fetchQueue = new Set<string>();
@@ -178,7 +170,6 @@ export async function openProject(projectId: string) {
       phase: "ready",
       fromCache: true,
     });
-    cached.pending.forEach((p) => mine.add(p.id));
     recompute();
   }
 
@@ -376,7 +367,6 @@ function flushIncoming() {
   incoming = [];
   if (!fresh.length) return;
 
-  const touched: Record<string, number> = {};
   const missing: string[] = [];
   for (const e of fresh) {
     const taskId = taskIdOf(e);
@@ -385,7 +375,6 @@ function flushIncoming() {
       stash.set(taskId, [...(stash.get(taskId) ?? []), e]);
       missing.push(taskId);
     }
-    if (taskId && !(e.clientMutationId && mine.has(e.clientMutationId))) touched[taskId] = e.seq;
     if (e.type === "comment.deleted") deletedComments.add(e.payload.commentId);
   }
 
@@ -396,7 +385,6 @@ function flushIncoming() {
     confirmed: next,
     pending: s.pending.filter((p) => !acked.has(p.id) && !(p.ackedVersion !== null && p.ackedVersion <= version)),
     activity: [...fresh.reverse(), ...s.activity].slice(0, MAX_ACTIVITY),
-    remoteTouched: Object.keys(touched).length ? { ...s.remoteTouched, ...touched } : s.remoteTouched,
   }));
   recompute();
   scheduleSave();
@@ -455,14 +443,11 @@ export function dispatch(command: Command, opts: { history?: "record" | "skip" }
   if (!bodies.length) return true;
 
   const id = nanoid();
-  mine.add(id);
   const events = bodies.map((b) => ({ ...b, projectId, seq: 0, actor: me, clientMutationId: id, timestamp: now }) as DomainEvent);
   const inverse = opts.history === "skip" ? null : invert(command, view);
-  const pin = command.type === "task.create" ? command.task.id : command.type === "task.update" && command.patch.status ? command.taskId : null;
   set((s) => ({
     pending: [...s.pending, { id, command, events, ackedVersion: null }],
     ...(inverse && { undoStack: [...s.undoStack, inverse].slice(-MAX_UNDO), redoStack: [] }),
-    ...(pin && { pinned: [pin, ...s.pinned.filter((x) => x !== pin)] }),
   }));
   recompute();
   scheduleSave(true);
