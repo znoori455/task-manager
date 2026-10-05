@@ -36,7 +36,22 @@ let selection: { taskId: string | null; field: EditableField | null } = { taskId
 let backoff = 500;
 let reconnectTimer: ReturnType<typeof setTimeout> | undefined;
 let notificationHandler: ((n: NotificationView) => void) | null = null;
+let syncHandler: ((change: { read?: string[] | "all"; removed?: string[] | "all" }) => void) | null = null;
 let reconnectHandler: (() => void) | null = null;
+let everConnected = false;
+
+// Hot reload in dev re-runs this module; without this, the previous copy's
+// socket would keep reconnecting forever (one more zombie per edit).
+const g = globalThis as unknown as { __taskflowRealtime?: { dispose: () => void } };
+g.__taskflowRealtime?.dispose();
+let disposed = false;
+g.__taskflowRealtime = {
+  dispose() {
+    disposed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    ws?.close();
+  },
+};
 
 function url() {
   if (process.env.NEXT_PUBLIC_REALTIME_URL) return process.env.NEXT_PUBLIC_REALTIME_URL;
@@ -48,8 +63,13 @@ function send(msg: ClientMessage) {
 }
 
 /** Connect once per page load (after the user has a session). */
-export function startRealtime(handlers: { onNotification: (n: NotificationView) => void; onReconnect: () => void }) {
+export function startRealtime(handlers: {
+  onNotification: (n: NotificationView) => void;
+  onNotificationSync: (change: { read?: string[] | "all"; removed?: string[] | "all" }) => void;
+  onReconnect: () => void;
+}) {
   notificationHandler = handlers.onNotification;
+  syncHandler = handlers.onNotificationSync;
   reconnectHandler = handlers.onReconnect;
   if (started) return;
   started = true;
@@ -64,6 +84,7 @@ export function startRealtime(handlers: { onNotification: (n: NotificationView) 
 
 function connect() {
   if (reconnectTimer) clearTimeout(reconnectTimer);
+  if (disposed) return;
   if (!navigator.onLine) return set({ status: "offline" });
   const socket = new WebSocket(url());
   ws = socket;
@@ -72,11 +93,13 @@ function connect() {
     set({ status: "live" });
     if (room) send({ type: "join", room });
     if (room && room !== "lobby" && selection.taskId) send({ type: "select", ...selection });
-    reconnectHandler?.();
+    // Notifications are loaded at startup; refetch only after a reconnect (we may have missed some).
+    if (everConnected) reconnectHandler?.();
+    everConnected = true;
   };
   socket.onmessage = (e) => receive(JSON.parse(e.data) as ServerMessage);
   socket.onclose = () => {
-    if (ws !== socket) return;
+    if (ws !== socket || disposed) return;
     set({ status: navigator.onLine ? "reconnecting" : "offline", peers: [], cursors: {}, typing: {} });
     reconnectTimer = setTimeout(connect, backoff);
     backoff = Math.min(backoff * 2, 10_000);
@@ -113,6 +136,8 @@ function receive(msg: ServerMessage) {
       return set({ lobby: { ...get().lobby, ...msg.projects } });
     case "notification":
       return notificationHandler?.(msg.notification);
+    case "notifications.sync":
+      return syncHandler?.({ read: msg.read, removed: msg.removed });
     case "error":
       console.warn("[realtime]", msg.message);
   }

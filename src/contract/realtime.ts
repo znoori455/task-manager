@@ -52,6 +52,11 @@ export interface NotificationView {
   readAt: string | null;
 }
 
+/** Payloads on Redis `notify:<user>`: published by the app, forwarded by the realtime service. */
+export type NotifyPayload =
+  | { kind: "new"; notification: NotificationView }
+  | { kind: "sync"; read?: string[] | "all"; removed?: string[] | "all" };
+
 export type ServerMessage =
   | { type: "welcome"; connId: string; name: string }
   /** Full list of peers in the current project room (small; sent on every change). */
@@ -62,4 +67,6 @@ export type ServerMessage =
   /** Lobby: who is in which project. A patch: merge into what you have (empty list = nobody). */
   | { type: "lobby"; projects: Record<string, string[]> }
   | { type: "notification"; notification: NotificationView }
+  /** Notifications read or removed elsewhere (e.g. another tab): apply the same change here. */
+  | { type: "notifications.sync"; read?: string[] | "all"; removed?: string[] | "all" }
   | { type: "error"; message: string };

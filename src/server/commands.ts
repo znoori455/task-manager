@@ -206,7 +206,7 @@ async function persist(tx: Tx, ctx: DecideContext, newEvents: DomainEvent[]): Pr
 async function broadcast(projectId: string, newEvents: DomainEvent[], notified: NotificationRow[]) {
   try {
     // Live delivery via the realtime service; the list is always refetchable from Postgres.
-    for (const { recipient, ...n } of notified) await publish(channels.notify(recipient), n);
+    for (const { recipient, ...notification } of notified) await publish(channels.notify(recipient), { kind: "new", notification });
     for (const event of newEvents) await publish(channels.project(projectId), { kind: "event", event });
     await cacheEvents(projectId, newEvents);
     // Every write moves the project up the "last updated" list. Tell the lobby,

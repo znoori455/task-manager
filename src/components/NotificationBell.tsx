@@ -1,7 +1,7 @@
 "use client";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-import { describeNotification, markRead, useNotifications } from "@/client/notifications";
+import { describeNotification, markRead, removeNotifications, useNotifications } from "@/client/notifications";
 import { selectTask, useStore } from "@/client/store";
 import type { NotificationView } from "@/contract/realtime";
 import { Avatar, timeAgo } from "./ui";
@@ -51,15 +51,28 @@ export function NotificationBell() {
         <div className="absolute right-0 z-30 mt-2 w-96 max-w-[calc(100vw-2rem)] overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-xl">
           <div className="flex items-center justify-between border-b border-zinc-100 px-3 py-2">
             <span className="text-sm font-medium">Notifications</span>
-            <button className="text-xs text-sky-700 hover:underline disabled:text-zinc-300" disabled={!unread} onClick={() => void markRead()}>
-              Mark all read
-            </button>
+            <span className="flex gap-3">
+              <button className="text-xs text-sky-700 hover:underline disabled:text-zinc-300 disabled:no-underline" disabled={!unread} onClick={() => void markRead()}>
+                Mark all read
+              </button>
+              <button className="text-xs text-zinc-500 hover:text-rose-600 hover:underline disabled:text-zinc-300 disabled:no-underline" disabled={!items.length} onClick={() => void removeNotifications()}>
+                Clear all
+              </button>
+            </span>
           </div>
           <ul className="max-h-96 divide-y divide-zinc-100 overflow-y-auto" data-testid="notification-list">
-            {items.length === 0 && <li className="px-3 py-6 text-center text-sm text-zinc-400">Nothing yet. You&apos;ll hear about mentions and your tasks here.</li>}
+            {items.length === 0 && <li className="px-3 py-6 text-center text-sm text-zinc-400">No notifications. You&apos;ll hear about mentions and your tasks here.</li>}
             {items.map((n) => (
-              <li key={n.id}>
-                <button onClick={() => openNotification(n)} className={`flex w-full gap-2.5 px-3 py-2.5 text-left text-sm hover:bg-zinc-50 ${n.readAt ? "" : "bg-sky-50/60"}`}>
+              <li key={n.id} className={`group relative ${n.readAt ? "" : "bg-sky-50/60"}`} data-testid="notification">
+                <button
+                  className="absolute right-2 top-2 z-10 rounded px-1 text-zinc-400 opacity-0 hover:bg-zinc-100 hover:text-zinc-700 focus:opacity-100 group-hover:opacity-100"
+                  onClick={() => void removeNotifications([n.id])}
+                  aria-label="Dismiss notification"
+                  title="Dismiss"
+                >
+                  ×
+                </button>
+                <button onClick={() => openNotification(n)} className="flex w-full gap-2.5 py-2.5 pl-3 pr-8 text-left text-sm hover:bg-zinc-50/80">
                   <span className="relative">
                     <Avatar name={n.actor} size="xs" />
                     <span className="absolute -bottom-1 -right-1 rounded-full bg-white text-[10px] leading-none">{ICONS[n.type]}</span>

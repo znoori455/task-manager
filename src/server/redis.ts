@@ -2,7 +2,7 @@
 // each project's most recent events (fast reconnect replay), and rate limiting.
 // Postgres stays the source of truth; losing Redis only degrades latency.
 import Redis from "ioredis";
-import type { NotificationView } from "@/contract/realtime";
+import type { NotifyPayload } from "@/contract/realtime";
 import type { DomainEvent } from "@/domain/events";
 import type { Project } from "@/domain/types";
 
@@ -64,7 +64,7 @@ export function subscribe(channel: string, listener: Listener): () => void {
   };
 }
 
-export async function publish(channel: string, message: ProjectMessage | LobbyMessage | NotificationView) {
+export async function publish(channel: string, message: ProjectMessage | LobbyMessage | NotifyPayload) {
   await redis.publish(channel, JSON.stringify(message));
 }
 

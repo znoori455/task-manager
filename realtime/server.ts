@@ -18,7 +18,7 @@ import Redis from "ioredis";
 import { nanoid } from "nanoid";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import { userKey } from "../src/domain/mentions";
-import { clientMessageSchema, type CursorUpdate, type EditableField, type Peer, type ServerMessage } from "../src/contract/realtime";
+import { clientMessageSchema, type CursorUpdate, type NotificationView, type NotifyPayload, type EditableField, type Peer, type ServerMessage } from "../src/contract/realtime";
 
 const SESSION_COOKIE = "tf_user";
 const CURSOR_FLUSH_MS = 66;
@@ -155,7 +155,12 @@ export async function startRealtimeServer(opts: RealtimeOptions) {
       for (const conn of conns.values()) if (conn.room === "lobby") send(conn, { type: "lobby", projects });
     } else if (channel.startsWith("notify:")) {
       const user = channel.slice("notify:".length);
-      for (const conn of conns.values()) if (userKey(conn.name) === user) send(conn, { type: "notification", notification: JSON.parse(raw) });
+      const parsed = JSON.parse(raw) as NotifyPayload | NotificationView;
+      // Older app versions published a bare NotificationView; accept both so a rolling deploy doesn't drop notifications.
+      const payload: NotifyPayload = "kind" in parsed ? parsed : { kind: "new", notification: parsed };
+      const msg: ServerMessage =
+        payload.kind === "new" ? { type: "notification", notification: payload.notification } : { type: "notifications.sync", read: payload.read, removed: payload.removed };
+      for (const conn of conns.values()) if (userKey(conn.name) === user) send(conn, msg);
     }
   });
 

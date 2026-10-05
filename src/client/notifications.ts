@@ -32,18 +32,48 @@ export function receiveNotification(n: NotificationView) {
 }
 
 export async function markRead(ids?: string[]) {
-  const now = new Date().toISOString();
   // Optimistic; the server's count wins.
-  set((s) => ({
-    items: s.items.map((n) => (!ids || ids.includes(n.id) ? { ...n, readAt: n.readAt ?? now } : n)),
-    unread: ids ? Math.max(0, s.unread - s.items.filter((n) => ids.includes(n.id) && !n.readAt).length) : 0,
-  }));
+  applySync({ read: ids ?? "all" });
   try {
     const { unread } = await call("POST /api/notifications/read", { body: { ids } });
     set({ unread });
   } catch {
     // Retried implicitly: the next load reflects the server state.
   }
+}
+
+/** Remove notifications (all when `ids` is omitted). Optimistic; restored if the request fails. */
+export async function removeNotifications(ids?: string[]) {
+  const before = useNotifications.getState();
+  applySync({ removed: ids ?? "all" });
+  try {
+    const { unread } = ids?.length === 1 ? await call("DELETE /api/notifications/:id", { params: { id: ids[0] } }) : await clearMany(ids);
+    set({ unread });
+  } catch {
+    set({ items: before.items, unread: before.unread });
+    toast("error", "Couldn't clear notifications. Check your connection.");
+  }
+}
+
+async function clearMany(ids?: string[]) {
+  if (!ids) return call("DELETE /api/notifications");
+  let last = { unread: useNotifications.getState().unread };
+  for (const id of ids) last = await call("DELETE /api/notifications/:id", { params: { id } });
+  return last;
+}
+
+/** Apply a read/remove that happened elsewhere (another tab), or optimistically here. */
+export function applySync(change: { read?: string[] | "all"; removed?: string[] | "all" }) {
+  const now = new Date().toISOString();
+  set((s) => {
+    const removed = (n: NotificationView) => change.removed === "all" || !!change.removed?.includes(n.id);
+    const read = (n: NotificationView) => change.read === "all" || !!change.read?.includes(n.id);
+    const items = s.items.filter((n) => !removed(n)).map((n) => (!n.readAt && read(n) ? { ...n, readAt: now } : n));
+    const lostUnread = s.items.filter((n) => !n.readAt && (removed(n) || read(n))).length;
+    // "all" also covers notifications beyond the loaded page.
+    const unread = change.read === "all" || change.removed === "all" ? 0 : Math.max(0, s.unread - lostUnread);
+    return { items, unread };
+  });
 }
 
 export function describeNotification(n: NotificationView): string {
