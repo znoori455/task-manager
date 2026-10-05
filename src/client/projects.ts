@@ -11,14 +11,10 @@ import { loadProjectsCache, saveProjectsCache } from "./cache";
 
 interface ProjectsState {
   byId: Record<string, ProjectSummary>;
-  /** Project id -> time someone else changed it (drives the "N updated" pill). */
-  remoteTouched: Record<string, number>;
-  /** Projects I created this session, shown on top until the feed includes them. */
-  pinned: string[];
   lastSync: number | null;
 }
 
-export const useProjects = create<ProjectsState>(() => ({ byId: {}, remoteTouched: {}, pinned: [], lastSync: null }));
+export const useProjects = create<ProjectsState>(() => ({ byId: {}, lastSync: null }));
 const get = useProjects.getState;
 const set = useProjects.setState;
 
@@ -37,18 +33,16 @@ function scheduleSave() {
   }, 500);
 }
 
-function upsert(list: (Project & Partial<Pick<ProjectSummary, "taskCount">>)[], touched = false) {
+function upsert(list: (Project & Partial<Pick<ProjectSummary, "taskCount">>)[]) {
   if (!list.length) return;
   set((s) => {
     const byId = { ...s.byId };
-    const remoteTouched = { ...s.remoteTouched };
     for (const p of list) {
       const prev = byId[p.id];
       if (prev && Date.parse(prev.updatedAt) > Date.parse(p.updatedAt)) continue;
       byId[p.id] = { ...p, taskCount: p.taskCount ?? prev?.taskCount ?? 0 };
-      if (touched && !s.pinned.includes(p.id)) remoteTouched[p.id] = Date.now();
     }
-    return { byId, remoteTouched };
+    return { byId };
   });
   scheduleSave();
 }
@@ -65,10 +59,8 @@ function remove(ids: string[]) {
 
 export const ingestProjects = (list: ProjectSummary[]) => upsert(list);
 
-export function pinProject(p: Project) {
-  set((s) => ({ pinned: [p.id, ...s.pinned] }));
-  upsert([{ ...p, taskCount: 0 }]);
-}
+/** Show a project I just created right away (the lobby event may arrive later). */
+export const addCreatedProject = (p: Project) => upsert([{ ...p, taskCount: 0 }]);
 
 /** Start once per page load: cached list, catch-up, then live lobby events. */
 export async function startProjects() {
@@ -104,6 +96,6 @@ function connectLobby() {
   lobby.onmessage = (m) => {
     const msg = JSON.parse(m.data) as { kind: "project.upserted"; project: Project } | { kind: "project.deleted"; projectId: string };
     if (msg.kind === "project.deleted") remove([msg.projectId]);
-    else upsert([msg.project], true);
+    else upsert([msg.project]);
   };
 }

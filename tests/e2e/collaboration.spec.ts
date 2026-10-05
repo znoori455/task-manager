@@ -35,13 +35,11 @@ test("changes sync between clients in real time", async ({ browser, baseURL, req
   await expect(alice.getByText("Live")).toBeVisible();
   await expect(bob.getByText("Live")).toBeVisible();
 
-  // Alice creates a task -> it's at the top of her list; Bob's list order is frozen,
-  // so it shows up behind the "updated" pill.
+  // Alice creates a task -> it appears at the top of both lists, live.
   await alice.getByPlaceholder("Add a task and press Enter").fill("Ship the feature");
   await alice.keyboard.press("Enter");
   await expect(alice.getByTestId("task-row").first()).toContainText("Ship the feature");
-  await bob.getByTestId("updates-pill").filter({ hasText: "1 updated" }).click();
-  await expect(bob.getByTestId("task-row").filter({ hasText: "Ship the feature" })).toBeVisible();
+  await expect(bob.getByTestId("task-row").first()).toContainText("Ship the feature");
 
   // Bob opens it and comments with a mention -> Alice sees the comment and gets notified.
   await bob.getByTestId("task-row").filter({ hasText: "Ship the feature" }).click();
@@ -131,3 +129,25 @@ test("switching users with unsynced offline edits asks before discarding them", 
   const { tasks } = await (await request.get(`/api/projects/${project.id}/tasks`)).json();
   expect(tasks).toEqual([]);
 });
+
+test("lists re-sort live: a task someone else edits moves to the top without a refresh", async ({ browser, baseURL, request }) => {
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e-order ${Date.now()}` }, headers })).json();
+  const cmd = (id: string, command: object) => request.post(`/api/projects/${project.id}/commands`, { data: { clientMutationId: id, command }, headers });
+  for (const n of [1, 2, 3]) await cmd(`c${n}`, { type: "task.create", task: { id: `${project.id}-${n}`, title: `Task ${n}` } });
+
+  const page = await userPage(browser, `watcher${Date.now()}`, baseURL!);
+  await page.goto(`/projects/${project.id}`);
+  const rows = page.getByTestId("task-row");
+  await expect(rows.first()).toContainText("Task 3"); // most recently updated first
+
+  // Someone else edits the oldest task: it jumps to the top on its own.
+  await cmd("edit", { type: "task.update", taskId: `${project.id}-1`, patch: { priority: "urgent" } });
+  await expect(rows.first()).toContainText("Task 1");
+
+  // ...and a task someone else creates appears at the top, too.
+  await cmd("new", { type: "task.create", task: { id: `${project.id}-4`, title: "Task 4" } });
+  await expect(rows.first()).toContainText("Task 4");
+  await expect(rows).toHaveCount(4);
+});
+

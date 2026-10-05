@@ -1,14 +1,13 @@
 "use client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef } from "react";
-import { useShowTaskUpdates, useTaskFeed } from "@/client/feeds";
+import { useTaskFeed } from "@/client/feeds";
 import { ensureTasks, selectTask, useStore } from "@/client/store";
 import { useInfiniteTrigger } from "@/client/useInfiniteTrigger";
 import type { TaskFilter } from "@/contract/filters";
 import { blockingDependencies } from "@/domain/rules";
 import type { Task } from "@/domain/types";
 import { clearCursorOnLeave, cursorHandlers, RemoteCursors, selectionStyle, usePeersOnTask } from "./Collaboration";
-import { UpdatesPill } from "./UpdatesPill";
 import { Avatar, PriorityLabel, StatusBadge, Tag } from "./ui";
 
 const ROW_HEIGHT = 44;
@@ -23,7 +22,6 @@ const WIDE = "hidden @2xl:flex";
 export function TaskList({ filter, selectedId }: { filter: TaskFilter; selectedId: string | null }) {
   const parentRef = useRef<HTMLDivElement>(null);
   const feed = useTaskFeed(filter);
-  const showUpdates = useShowTaskUpdates();
   const virtualizer = useVirtualizer({
     count: feed.ids.length + (feed.hasNextPage ? 1 : 0),
     getScrollElement: () => parentRef.current,
@@ -41,13 +39,6 @@ export function TaskList({ filter, selectedId }: { filter: TaskFilter; selectedI
         <span className={WIDE}>Assignees</span>
         <span className={WIDE}>Tags</span>
       </div>
-      <UpdatesPill
-        count={feed.updates}
-        onShow={() => {
-          parentRef.current?.scrollTo({ top: 0 });
-          showUpdates();
-        }}
-      />
       {feed.ids.length === 0 ? (
         <p className="p-6 text-sm text-zinc-500">{feed.isLoading ? "Loading…" : "No tasks match."}</p>
       ) : (

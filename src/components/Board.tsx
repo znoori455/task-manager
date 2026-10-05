@@ -1,7 +1,7 @@
 "use client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useMemo, useRef, useState } from "react";
-import { useShowTaskUpdates, useTaskFeed } from "@/client/feeds";
+import { useTaskFeed } from "@/client/feeds";
 import { dispatch, selectTask, useStore } from "@/client/store";
 import { useInfiniteTrigger } from "@/client/useInfiniteTrigger";
 import type { TaskCounts } from "@/contract/api";
@@ -10,7 +10,6 @@ import { STATUS_LABELS, canTransition } from "@/domain/rules";
 import { TASK_STATUSES, type Task, type TaskStatus } from "@/domain/types";
 import { Avatar, PriorityLabel, STATUS_STYLES } from "./ui";
 import { clearCursorOnLeave, cursorHandlers, RemoteCursors, selectionStyle, usePeersOnTask } from "./Collaboration";
-import { UpdatesPill } from "./UpdatesPill";
 
 const CARD_HEIGHT = 84;
 
@@ -61,7 +60,6 @@ function Column({
   const [over, setOver] = useState(false);
   const columnFilter = useMemo(() => ({ ...filter, status }), [filter, status]);
   const feed = useTaskFeed(columnFilter);
-  const showUpdates = useShowTaskUpdates();
   const virtualizer = useVirtualizer({
     count: feed.ids.length + (feed.hasNextPage ? 1 : 0),
     getScrollElement: () => parentRef.current,
@@ -91,13 +89,6 @@ function Column({
         <span className="text-xs text-zinc-400">{(count ?? feed.ids.length).toLocaleString()}</span>
       </header>
       <div className="relative min-h-0 flex-1">
-        <UpdatesPill
-          count={feed.updates}
-          onShow={() => {
-            parentRef.current?.scrollTo({ top: 0 });
-            showUpdates();
-          }}
-        />
         <div ref={parentRef} className="absolute inset-0 overflow-auto p-2" {...clearCursorOnLeave}>
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((row) => {
