@@ -154,3 +154,81 @@ test("two people edit a description together: text merges live, carets show, and
   await ann.page.reload();
   await expect.poll(() => editorText(ann.page)).toBe(merged);
 });
+
+const REALTIME_WS = `ws://localhost:${process.env.E2E_REALTIME_PORT ?? 3001}/ws`;
+
+async function projectWithTask(request: import("@playwright/test").APIRequestContext, title: string, description = "") {
+  const headers = setupHeaders();
+  const { project } = await (await request.post("/api/projects", { data: { name: `e2e ${title} ${Date.now()}` }, headers })).json();
+  const taskId = `${project.id}-t`;
+  await request.post(`/api/projects/${project.id}/commands`, {
+    data: { clientMutationId: "seed", command: { type: "task.create", task: { id: taskId, title, configuration: { description } } } },
+    headers,
+  });
+  return { projectId: project.id as string, taskId, headers };
+}
+
+test("fast typing in a shared description arrives in full, without dropping the connection", async ({ browser, baseURL, request }) => {
+  const stamp = Date.now();
+  const { projectId, taskId } = await projectWithTask(request, "Burst");
+  const open = async (name: string) => {
+    const page = await userPage(browser, name, baseURL!);
+    // Record WebSocket closes (the service closes floods with code 1008).
+    await page.addInitScript(() => {
+      (window as unknown as { __closes: number[] }).__closes = [];
+      const Orig = window.WebSocket;
+      window.WebSocket = class extends Orig {
+        constructor(...args: ConstructorParameters<typeof WebSocket>) {
+          super(...args);
+          this.addEventListener("close", (e) => (window as unknown as { __closes: number[] }).__closes.push(e.code));
+        }
+      } as typeof WebSocket;
+    });
+    await page.goto(`/projects/${projectId}?task=${taskId}`);
+    await expect(page.getByTestId("collab-description").locator(".cm-content")).toBeVisible();
+    return page;
+  };
+  const typist = await open(`fast${stamp}`);
+  const reader = await open(`reader${stamp}`);
+
+  const burst = "lorem ipsum dolor sit amet ".repeat(15).trim(); // ~400 keystrokes, no delay
+  await typist.getByTestId("collab-description").locator(".cm-content").click();
+  await typist.keyboard.type(burst);
+
+  await expect.poll(() => editorText(reader), { timeout: 5000 }).toBe(burst);
+  expect(await typist.evaluate(() => (window as unknown as { __closes: number[] }).__closes)).not.toContain(1008);
+});
+
+test("a panel opened while the realtime service is unreachable upgrades to live editing once it's back", async ({ browser, baseURL, request }) => {
+  const { projectId, taskId } = await projectWithTask(request, "Upgrade", "Start.");
+  const page = await userPage(browser, `late${Date.now()}`, baseURL!);
+  let blocked = true;
+  await page.routeWebSocket(REALTIME_WS, (ws) => {
+    if (blocked) ws.close();
+    else ws.connectToServer();
+  });
+  await page.goto(`/projects/${projectId}?task=${taskId}`);
+  const panel = page.getByTestId("task-panel");
+  await expect(panel.getByPlaceholder("Add a description…")).toHaveValue("Start.");
+  await expect(panel.getByText(/Co-editing is reconnecting/)).toBeVisible();
+
+  blocked = false; // the client retries with backoff
+  await expect(page.getByTestId("collab-description").locator(".cm-content")).toBeVisible({ timeout: 15_000 });
+  await expect.poll(() => editorText(page)).toBe("Start.");
+});
+
+test("a focused field still shows other people's changes until you start typing", async ({ browser, baseURL, request }) => {
+  const { projectId, taskId, headers } = await projectWithTask(request, "Original title");
+  const page = await userPage(browser, `focus${Date.now()}`, baseURL!);
+  await page.goto(`/projects/${projectId}?task=${taskId}`);
+  const title = page.getByTestId("task-panel").getByRole("textbox").first();
+  await expect(title).toHaveValue("Original title");
+  await title.focus();
+
+  await request.post(`/api/projects/${projectId}/commands`, {
+    data: { clientMutationId: "rename", command: { type: "task.update", taskId, patch: { title: "Renamed by someone else" } } },
+    headers,
+  });
+  await expect(title).toHaveValue("Renamed by someone else");
+  await expect(title).toBeFocused();
+});

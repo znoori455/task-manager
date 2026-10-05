@@ -2,8 +2,9 @@
 import { useState } from "react";
 
 /**
- * Text input that keeps a local draft while focused and commits on blur/Enter.
- * While not being edited it follows the live value, so remote edits show up.
+ * Text input that commits on blur/Enter. It follows the live value until you
+ * start typing (even while focused), so remote edits keep showing up; from the
+ * first keystroke it keeps your draft until you commit or press Escape.
  */
 export function EditableText({
   value,
@@ -31,10 +32,7 @@ export function EditableText({
     className,
     placeholder,
     value: draft ?? value,
-    onFocus: () => {
-      setDraft(value);
-      onEditing?.(true);
-    },
+    onFocus: () => onEditing?.(true),
     onChange: (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setDraft(e.target.value),
     onBlur: commit,
     onKeyDown: (e: React.KeyboardEvent) => {

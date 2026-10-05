@@ -7,6 +7,13 @@ import { Awareness, applyAwarenessUpdate, encodeAwarenessUpdate, removeAwareness
 import { registerDoc, sendDoc } from "./realtime";
 
 const REMOTE = "remote";
+/**
+ * Outgoing batching. Each keystroke produces a Yjs update and a caret update; sending
+ * them one by one can exceed the service's per-connection rate limit (held-down keys
+ * auto-repeat ~30/s), and a disconnect shows up as lag. Merged, traffic stays ≤ ~30 msg/s.
+ */
+const UPDATE_BATCH_MS = 50;
+const CARET_BATCH_MS = 100;
 const toB64 = (u: Uint8Array) => btoa(Array.from(u, (b) => String.fromCharCode(b)).join(""));
 const fromB64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
@@ -46,15 +53,37 @@ export function openDescriptionSession(
   // After the first sync, rejoining offers our current text as the seed (used only if the draft expired).
   const currentSeed = () => (generation ? text.toString() : seed);
 
+  let outgoing: Uint8Array[] = [];
+  let updateTimer: ReturnType<typeof setTimeout> | undefined;
+  const flushUpdates = () => {
+    if (updateTimer) clearTimeout(updateTimer);
+    updateTimer = undefined;
+    if (!outgoing.length || !generation) return;
+    const update = outgoing.length === 1 ? outgoing[0] : Y.mergeUpdates(outgoing);
+    outgoing = [];
+    sendDoc({ type: "doc.update", taskId, generation, update: toB64(update) });
+  };
   const onDocUpdate = (update: Uint8Array, origin: unknown) => {
-    if (origin !== REMOTE && generation) sendDoc({ type: "doc.update", taskId, generation, update: toB64(update) });
+    if (origin === REMOTE || !generation) return;
+    outgoing.push(update);
+    updateTimer ??= setTimeout(flushUpdates, UPDATE_BATCH_MS);
   };
   doc.on("update", onDocUpdate);
 
+  const caretChanges = new Set<number>();
+  let caretTimer: ReturnType<typeof setTimeout> | undefined;
+  const flushCarets = () => {
+    if (caretTimer) clearTimeout(caretTimer);
+    caretTimer = undefined;
+    if (!caretChanges.size) return;
+    const changed = [...caretChanges];
+    caretChanges.clear();
+    sendDoc({ type: "doc.awareness", taskId, update: toB64(encodeAwarenessUpdate(awareness, changed)) });
+  };
   const onAwarenessUpdate = ({ added, updated, removed }: { added: number[]; updated: number[]; removed: number[] }, origin: unknown) => {
     if (origin === REMOTE) return;
-    const changed = [...added, ...updated, ...removed];
-    sendDoc({ type: "doc.awareness", taskId, update: toB64(encodeAwarenessUpdate(awareness, changed)) });
+    for (const id of [...added, ...updated, ...removed]) caretChanges.add(id);
+    caretTimer ??= setTimeout(flushCarets, CARET_BATCH_MS);
   };
   awareness.on("update", onAwarenessUpdate);
 
@@ -75,6 +104,7 @@ export function openDescriptionSession(
       }
       // Re-announce our caret to whoever is there now.
       onAwarenessUpdate({ added: [], updated: [doc.clientID], removed: [] }, null);
+      flushCarets();
     },
     onUpdate(update) {
       Y.applyUpdate(doc, fromB64(update), REMOTE);
@@ -102,7 +132,9 @@ export function openDescriptionSession(
     destroy() {
       if (destroyed) return;
       destroyed = true;
+      flushUpdates();
       awareness.setLocalState(null); // tells peers to remove our caret
+      flushCarets();
       sendDoc({ type: "doc.leave", taskId });
       unregister();
       awareness.off("update", onAwarenessUpdate);

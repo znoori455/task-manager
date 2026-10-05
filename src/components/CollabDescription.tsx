@@ -12,6 +12,8 @@ import { colorFor } from "./ui";
 
 /** Save this long after you stop typing (and immediately on blur / close). */
 const AUTOSAVE_MS = 1500;
+/** If the shared draft hasn't loaded by then (service down, older service version), use the plain editor. */
+const READY_TIMEOUT_MS = 5000;
 
 const theme = EditorView.theme({
   "&": { fontSize: "14px", border: "1px solid #d4d4d8", borderRadius: "6px", background: "white" },
@@ -27,12 +29,14 @@ export default function CollabDescription({
   saved,
   me,
   onSave,
+  onUnavailable,
 }: {
   taskId: string;
   /** The saved description (seed for a new draft, and what autosave compares against). */
   saved: string;
   me: string;
   onSave: (text: string) => void;
+  onUnavailable?: () => void;
 }) {
   const host = useRef<HTMLDivElement>(null);
   const [resets, setResets] = useState(0);
@@ -40,9 +44,11 @@ export default function CollabDescription({
   // Latest values for callbacks created once per session.
   const savedRef = useRef(saved);
   const onSaveRef = useRef(onSave);
+  const onUnavailableRef = useRef(onUnavailable);
   useEffect(() => {
     savedRef.current = saved;
     onSaveRef.current = onSave;
+    onUnavailableRef.current = onUnavailable;
   });
 
   useEffect(() => {
@@ -69,7 +75,11 @@ export default function CollabDescription({
     session.text.observe(observer);
     window.addEventListener("pagehide", save);
 
+    let ready = false;
+    const readyTimer = setTimeout(() => !ready && onUnavailableRef.current?.(), READY_TIMEOUT_MS);
     void session.ready.then(() => {
+      ready = true;
+      clearTimeout(readyTimer);
       if (!host.current) return;
       setLoading(false);
       view = new EditorView({
@@ -93,6 +103,7 @@ export default function CollabDescription({
     });
 
     return () => {
+      clearTimeout(readyTimer);
       save();
       window.removeEventListener("pagehide", save);
       session.text.unobserve(observer);
