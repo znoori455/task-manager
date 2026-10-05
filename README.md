@@ -161,9 +161,11 @@ making a request.
   `useInfiniteQuery` fetches the next page when the virtualized list is about
   10 rows from the end. Page rows go into the sync store, and a feed is just an
   ordered list of ids.
-- **Frozen order.** Rows update in place, but changes by others don't reorder
-  the list. A pill counts them ("3 updated · show"), and clicking it refetches
-  from the top. Your own new tasks are pinned to the top.
+- **Live order.** A feed is the matching rows in the store, sorted by last
+  updated, so anything anyone edits or creates moves to its place immediately.
+  Loaded pages only decide how far down it reaches: rows newer than the last
+  loaded page are shown (including everything edited since), and older ones
+  appear as you scroll.
 - **Events for tasks not loaded yet** are held, and the task's row is fetched
   by id (batched). Each task stores the `seq` of the last event that changed
   it, so held events already reflected in the row are skipped. Loading pages
@@ -443,9 +445,10 @@ What's built (one region, N stateless app instances) and the next steps:
   stay constant whatever the project size, but search, filters, counts and the
   dependency picker now go to the server, and each filter change refetches.
   Offline, they work over the cached tasks only.
-- **Frozen order with an "N updated" pill.** Rows don't jump while you're
-  about to click them, at the cost of others' new tasks not appearing until you
-  click "show".
+- **Live re-sorting.** Lists sorted by last updated reorder as people work, so
+  a row can move while you're looking at it. (An earlier version froze the
+  order and showed an "N updated · show" button instead; live updates proved
+  more natural to use.)
 - **Change index outside the transaction.** Redis writes can't be atomic with
   Postgres. Instead of making writes depend on Redis (Redis down would mean no
   writes), the index tracks how far it's known to be complete, and Postgres
@@ -529,7 +532,7 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | └─ `db/schema.ts` | Tables and indexes (Drizzle); migrations are generated from this |
 | `src/client/` | Frontend data layer. |
 | ├─ `store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection, offline queue, catch-up |
-| ├─ `feeds.ts` | Infinite-scroll feeds (TanStack Query) with frozen order and the "N updated" count |
+| ├─ `feeds.ts` | Infinite-scroll feeds (TanStack Query), live-sorted by last updated |
 | ├─ `cache.ts` | IndexedDB persistence |
 | ├─ `projects.ts` | Project list state, lobby stream and catch-up |
 | ├─ `realtime.ts` | WebSocket connection: presence, cursors, selection, typing; reconnects and rejoins |
