@@ -8,8 +8,8 @@ client ends up in the same state. Tasks and projects load as infinite-scroll
 feeds sorted by last updated, and are cached in IndexedDB, so the app keeps
 working offline and catches up from a Redis change index when it reconnects.
 A small TypeScript **WebSocket service** adds live collaboration: presence,
-cursors pinned to tasks, shared selection, typing indicators and instant
-notifications.
+cursors pinned to tasks, shared selection, typing indicators, shared live
+editing of task descriptions, and instant notifications.
 
 ```bash
 docker compose up --build          # app on :3000 (runs migrations on start), WebSocket service on :3001
@@ -27,6 +27,9 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
 1. [What's implemented](#whats-implemented)
 2. [Architecture](#architecture)
 3. [How sync works](#how-sync-works)
+   - [Live collaboration (WebSocket service)](#live-collaboration-websocket-service)
+   - [Shared description editing](#shared-description-editing)
+   - [Notifications](#notifications)
    - [Offline and catch-up](#offline-and-catch-up)
 4. [Consistency model](#consistency-model)
 5. [Scaling over time](#scaling-over-time)
@@ -74,19 +77,20 @@ names to see collaboration live. API docs are at **/docs** (Swagger UI) and
   - server-side search, filters and counts (trigram index for title search),
   - indexing strategy,
   - load tests with scripts and [results](load/RESULTS.md).
-- **Option 3, Developer experience:**
-  - unit tests (domain), integration tests (real Postgres/Redis), and Playwright e2e tests (two browsers collaborating),
-  - GitHub Actions CI,
-  - OpenAPI/Swagger,
-  - Drizzle migrations and a seed script.
 - **Option 2, Advanced collaboration:**
   - presence: who's in each project (shown on the project list too) and which task they have open. It's tied to the WebSocket connection, so joins and leaves show instantly,
   - live cursors pinned to tasks, plus shared selection: a colored outline on the task someone has open, "bob is editing…" on fields, "bob is typing…" in comments,
   - shared live editing of task descriptions: several people type in the same description at once, with everyone's named caret shown ([how](#shared-description-editing)),
   - a live activity feed, plus notifications: a bell with unread count across all projects, delivered instantly,
   - @mentions with notifications, detected on the server and saved, so you see them even if you were offline. Assignment, comments and status changes on your tasks notify you too.
+- **Option 3, Developer experience:**
+  - unit tests (domain rules, notification rules, editor traffic batching), integration tests (write path, catch-up, notifications and the WebSocket service on real Postgres/Redis), and Playwright e2e tests (two browsers collaborating, offline, live editing),
+  - GitHub Actions CI,
+  - OpenAPI/Swagger,
+  - Drizzle migrations and a seed script.
 - **Option 4, partly:**
   - a Kanban board with drag and drop. Dropping a card is validated as a status transition.
+  - lists re-sort live: anything edited or created moves to its place by last updated, with no refresh.
   - offline support: tasks, projects and unsent edits are kept in IndexedDB, and a service worker caches the app shell so the app opens without a network. Edits made offline sync on reconnect, and conflicting ones are rolled back with a message ([how](#offline-and-catch-up)).
 
 ---
@@ -117,7 +121,7 @@ There are two real-time channels, each with a clear job:
 
 | | SSE (Next.js) | WebSocket (`realtime/`) |
 | --- | --- | --- |
-| Carries | Durable changes: the event log | Short-lived signals: presence, cursors, selection, typing. Also forwards notifications |
+| Carries | Durable changes: the event log | Short-lived signals: presence, cursors, selection, typing, and shared description drafts. Also forwards notifications |
 | Delivery | Ordered, gap-free, resumable (`Last-Event-ID`) | Latest-wins. Losing a cursor frame doesn't matter |
 | Direction | Server → client (writes are POST commands) | Both ways, high frequency (cursors ~20/s per user) |
 | State | Postgres (source of truth) + Redis cache | Redis only. Nothing in it needs to survive |
@@ -147,8 +151,11 @@ making a request.
    Never the whole project.
 4. `decide()` → events, numbered `version+1…`.
 5. `applyEvents()` on those rows, then upsert the changed rows, update
-   `projects.version`, and insert the events. Commit.
-6. Publish each event to Redis and append it to the recent-events cache.
+   `projects.version`, record the changed tasks in the Redis change index
+   ([catch-up](#offline-and-catch-up)), insert the events, and insert any
+   [notifications](#notifications) they trigger. Commit.
+6. Publish each event to Redis and append it to the recent-events cache;
+   publish each notification to its recipient's channel.
 
 ### Read and subscribe path
 
@@ -224,9 +231,11 @@ touches Postgres. Next.js route handlers can't hold WebSocket connections, so it
 runs alongside the app; it's TypeScript so it shares the message contract
 (`src/contract/realtime.ts`, zod) with the browser.
 
-- **Rooms:** one per project, plus a lobby for the project list. The same
-  `tf_user` cookie identifies the user, and the `Origin` header is checked
-  (cookie auth would otherwise let other sites connect as the user).
+- **Rooms:** one per project, plus a lobby for the project list, plus one
+  document room per task description being edited
+  ([below](#shared-description-editing)). The same `tf_user` cookie identifies
+  the user, and the `Origin` header is checked (cookie auth would otherwise let
+  other sites connect as the user).
 - **Presence:** a Redis hash per project (connection → name, open task, field
   being edited), published to every instance on each change.
   - Tied to the connection, so leaving shows instantly.
@@ -242,8 +251,8 @@ runs alongside the app; it's TypeScript so it shares the message contract
     batch every ~66 ms (latest wins).
 - **Backpressure:** cursor frames are skipped for a client with a backlog. A
   client far behind is disconnected; it reconnects and gets a fresh snapshot.
-  Each connection is rate limited (token bucket, 60 msg/s), and floods are
-  closed with code 1008.
+  Each connection is rate limited (token bucket: bursts of 120, 60 msg/s
+  sustained), and floods are closed with code 1008.
 - **Scaling:** no sticky sessions needed. Every instance subscribes to Redis
   channels only for rooms its own connections are in.
 
@@ -270,9 +279,17 @@ description is still a normal command in the event log.
   catch-up all work unchanged.
 - **Undo:** ⌘Z in the editor undoes only your own typing. Autosaves stay off
   the app-wide undo stack.
-- **Offline:** if the realtime connection isn't up when the task opens, the
-  plain editor is used and saves queue like any other edit. The editor code is
-  lazy-loaded (and preloaded when a project opens), and a failed download
+- **Traffic batching:** each keystroke produces a Yjs update and a caret
+  update. The client merges them (edits every 50 ms, carets every 100 ms), so
+  fast typing or held-down keys stay well under the service's rate limit
+  instead of tripping it and causing a reconnect.
+- **When live editing isn't available:** if the realtime connection is down
+  when the task opens (offline, reconnecting), the plain editor is used; it
+  saves when you click away, and its saves queue like any other edit. It
+  upgrades to the live editor as soon as the connection is back (unless you're
+  mid-edit). If a draft doesn't load within 5 s (e.g. an outdated realtime
+  service), the plain editor stays and a note says why. The editor code is
+  lazy-loaded (and preloaded when a project opens), and a failed download also
   falls back to the plain editor.
 
 ### Notifications
@@ -418,11 +435,9 @@ What's built (one region, N stateless app instances) and the next steps:
     pages and API calls.
   - A Go service would mean a second toolchain, and keeping the message types
     in sync between two languages.
-  - A ~300-line Node service shares the zod contract and the toolchain, never
-    touches business rules or the database, and scales on its own.
-- **Identity is a display name, so are mentions.** `@name` works for names made
-  of letters, digits, `_`, `.` or `-`, matched case-insensitively. A real user
-  directory would add autocomplete and stable user ids.
+  - A ~600-line Node service (presence and cursors in `server.ts`, shared drafts
+    in `docs.ts`) shares the zod contract and the toolchain, never touches
+    business rules or the database, and scales on its own.
 - **Server-ordered log instead of a full CRDT.**
   - Easier to reason about, makes business rules enforceable (cycles,
     workflow), and gives every client the same history.
@@ -455,9 +470,13 @@ What's built (one region, N stateless app instances) and the next steps:
   fills the gap. Writes stay available, and catch-up stays correct.
 - **Identity is a display-name cookie.** No auth, on purpose: it's outside the
   brief, and the design doesn't depend on it (`src/server/session.ts` is the
-  only place to change). Any user can access any project. "Switch user" in the
-  account menu signs out. Unsent offline edits would otherwise be sent under the
-  new name, so they're discarded after a confirmation.
+  only place to change). Any user can access any project.
+  - "Switch user" in the account menu signs out. Unsent offline edits would
+    otherwise be sent under the new name, so they're discarded after a
+    confirmation.
+  - Mentions use the same names: `@name` works for names made of letters,
+    digits, `_`, `.` or `-`, matched case-insensitively. A real user directory
+    would add autocomplete and stable user ids.
 - **Soft delete.** Keeps comments and dependency edges so delete can be undone.
   Deleted tasks don't block anything and are hidden.
 
@@ -475,6 +494,7 @@ What's built (one region, N stateless app instances) and the next steps:
 | **zustand** | Small store outside React, so the sync engine is plain TS. Components subscribe with fine-grained selectors |
 | **TanStack Query** | `useInfiniteQuery` for cursor-paginated feeds (tasks, board columns, projects), counts and search. Live updates come from SSE, so queries never go stale on their own |
 | **TanStack Virtual** | Virtualizes the list and each board column |
+| **Yjs + CodeMirror** (`y-codemirror.next`) | Shared live editing of descriptions: a CRDT merges concurrent typing character by character; CodeMirror shows everyone's named carets and gives per-user undo. Lazy-loaded |
 | **IndexedDB** (`idb-keyval`) | Offline copy of tasks, projects and unsent edits. `localStorage` is capped at ~5 MB and blocks the main thread; one 10k-task project is ~7 MB |
 | **Service worker** | Caches the app shell so the app opens offline (data stays in IndexedDB) |
 | **Vitest / Playwright / k6** | Unit and integration / two-browser e2e / load |
@@ -513,7 +533,7 @@ Playwright e2e, and a Docker image build.
 
 ## Project layout
 
-Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `server/changes.ts` → `client/store.ts` → `client/feeds.ts` → `realtime/server.ts`.
+Suggested reading order for onboarding: `domain` → `contract` → `server/commands.ts` → `server/sse.ts` → `server/changes.ts` → `client/store.ts` → `client/feeds.ts` → `realtime/server.ts` → `realtime/docs.ts` + `client/collab.ts`.
 
 | Path | What it is |
 | --- | --- |
@@ -532,7 +552,8 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `notifications.ts` | Notification list and mark-as-read queries |
 | ├─ `changes.ts` | Catch-up for returning clients: Redis sorted-set change indexes with a Postgres safety net |
 | ├─ `queries.ts` | Read endpoints (task/project feeds, counts, comments, activity) |
-| └─ `db/schema.ts` | Tables and indexes (Drizzle); migrations are generated from this |
+| ├─ `http.ts`, `session.ts` | Route-handler helpers (error → status mapping, body parsing, rate limiting); identity from the `tf_user` cookie |
+| └─ `db/` | `schema.ts` (tables and indexes; migrations are generated from it), `index.ts` (client), `mappers.ts` (rows ↔ domain types) |
 | `src/client/` | Frontend data layer. |
 | ├─ `store.ts` | **The client sync engine:** confirmed/pending/view state, optimistic updates, rollback, undo, SSE connection, offline queue, catch-up |
 | ├─ `feeds.ts` | Infinite-scroll feeds (TanStack Query), live-sorted by last updated |
@@ -540,12 +561,16 @@ Suggested reading order for onboarding: `domain` → `contract` → `server/comm
 | ├─ `projects.ts` | Project list state, lobby stream and catch-up |
 | ├─ `realtime.ts` | WebSocket connection: presence, cursors, selection, typing; reconnects and rejoins |
 | ├─ `collab.ts` | One shared description draft (Yjs doc, carets, resync after reconnect) |
-| └─ `notifications.ts` | Notification list, unread count, toasts |
+| ├─ `notifications.ts` | Notification list, unread count, toasts |
+| ├─ `api.ts` | Typed `fetch` wrapper, checked against the `Api` contract |
+| ├─ `session.ts` | Switch user (sign out, discarding unsent edits after confirming) |
+| └─ `useInfiniteTrigger.ts` | Loads the next page when a virtualized list nears its end |
 | `realtime/` | **The WebSocket service**: `server.ts` (rooms, presence, cursor batching, backpressure, notification forwarding), `docs.ts` (shared description drafts), `main.ts` |
-| `src/app/api/` | Thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint |
-| `src/components/` | UI: `ProjectView` (page shell), `TaskList` / `Board` (virtualized), `TaskPanel` (task details + comments), `Collaboration` (cursors, selection, typing), `CollabDescription` (shared editor), `NotificationBell` |
-| `drizzle/` | SQL migrations, generated by `npm run db:generate` (0004 adds `notifications`). Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
+| `src/app/` | Pages (`/` project list, `/projects/[id]`), `/docs` (Swagger UI), and `api/`: thin route handlers (parse → call `server/` → respond). `projects/[id]/commands` is the only write endpoint for project data |
+| `src/components/` | UI. Pages: `ProjectsPage`, `ProjectView` (project shell). Tasks: `TaskList` / `Board` (virtualized feeds), `TaskPanel` (details + comments), `DescriptionField` (picks the live `CollabDescription` or the plain `EditableText`). Live: `Collaboration` (cursors, selection, typing), `ActivityFeed`, `NotificationBell`, `Toasts`. App: `SessionGate` (name prompt), `UserMenu`, `Providers` (TanStack Query, service worker), `RealtimeBridge` |
+| `drizzle/` | SQL migrations, generated by `npm run db:generate`: 0000 initial schema, 0002–0003 feed indexes, 0004 `notifications`. Two hand-written parts: enabling `pg_trgm` (0001) and backfilling `projects.updated_at` (end of 0002) |
 | `scripts/` | `migrate.ts`, `seed.ts` |
-| `tests/` | `unit/` (domain, notification rules), `integration/` (write path, catch-up, notifications and the WebSocket service on real Postgres/Redis), `e2e/` (two-browser collaboration, live cursors/presence/notifications, offline) |
+| `tests/` | `unit/` (domain rules, notification rules, editor traffic batching), `integration/` (write path, catch-up, notifications, the WebSocket service and shared drafts on real Postgres/Redis), `e2e/` (two-browser collaboration, live cursors/presence/notifications, live editing, offline, switch user) |
 | `public/sw.js` | Service worker: caches the app shell for offline starts |
 | `load/` | Load-test scripts (k6 and SSE fan-out) and `RESULTS.md` |
+| Root | `Dockerfile` + `docker-compose.yml` (db, redis, app, realtime), `.github/workflows/ci.yml`, `playwright.config.ts`, `vitest.config.ts`, `drizzle.config.ts`. `AGENTS.md` / `CLAUDE.md` are Next.js notes for coding agents, added by the scaffold |
