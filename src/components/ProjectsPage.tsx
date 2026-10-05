@@ -7,6 +7,7 @@ import { pinProject, startProjects, useProjects } from "@/client/projects";
 import { joinRoom, useRealtime } from "@/client/realtime";
 import { useStore } from "@/client/store";
 import { NotificationBell } from "./NotificationBell";
+import { UserMenu } from "./UserMenu";
 import { UpdatesPill } from "./UpdatesPill";
 import { Avatar, timeAgo } from "./ui";
 
@@ -47,9 +48,7 @@ export function ProjectsPage() {
         {me && (
           <div className="flex items-center gap-3 text-sm text-zinc-600">
             <NotificationBell />
-            <span className="flex items-center gap-2">
-              <Avatar name={me} /> {me}
-            </span>
+            <UserMenu />
           </div>
         )}
       </header>

@@ -13,6 +13,7 @@ export interface ProjectSummary extends Project {
 export interface Api {
   "GET /api/session": { res: { name: string | null } };
   "POST /api/session": { body: { name: string }; res: { name: string } };
+  "DELETE /api/session": { res: { ok: true } };
   "GET /api/projects": { res: { projects: ProjectSummary[]; nextCursor: string | null } };
   "GET /api/projects/changes": { res: ProjectChanges };
   "POST /api/projects": { body: { name: string; description?: string }; res: { project: Project } };

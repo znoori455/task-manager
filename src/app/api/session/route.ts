@@ -14,3 +14,10 @@ export const POST = handler(async (req: NextRequest) => {
   res.headers.append("Set-Cookie", `${SESSION_COOKIE}=${encodeURIComponent(name)}; Path=/; SameSite=Lax; Max-Age=31536000`);
   return res;
 });
+
+/** Sign out (used to switch users). */
+export const DELETE = handler(async () => {
+  const res = json({ ok: true } satisfies ApiResponse<"DELETE /api/session">);
+  res.headers.append("Set-Cookie", `${SESSION_COOKIE}=; Path=/; SameSite=Lax; Max-Age=0`);
+  return res;
+});

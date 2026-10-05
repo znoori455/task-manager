@@ -417,7 +417,9 @@ What's built (one region, N stateless app instances) and the next steps:
   fills the gap. Writes stay available, and catch-up stays correct.
 - **Identity is a display-name cookie.** No auth, on purpose: it's outside the
   brief, and the design doesn't depend on it (`src/server/session.ts` is the
-  only place to change). Any user can access any project.
+  only place to change). Any user can access any project. "Switch user" in the
+  account menu signs out. Unsent offline edits would otherwise be sent under the
+  new name, so they're discarded after a confirmation.
 - **Soft delete.** Keeps comments and dependency edges so delete can be undone.
   Deleted tasks don't block anything and are hidden.
 

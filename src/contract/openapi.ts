@@ -68,6 +68,7 @@ export function openApiDocument() {
       "/api/session": {
         get: { summary: "Current display name", responses: { 200: ok({ type: "object", properties: { name: { type: ["string", "null"] } } }) } },
         post: { summary: "Set display name (cookie)", requestBody: json(toSchema(sessionSchema)), responses: { 200: ok({ type: "object" }), ...errors } },
+        delete: { summary: "Clear the display name (switch user)", responses: { 200: ok({ type: "object" }) } },
       },
       "/api/projects": {
         get: {

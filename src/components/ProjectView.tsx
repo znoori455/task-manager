@@ -16,6 +16,7 @@ import { EditableText } from "./EditableText";
 import { TaskList } from "./TaskList";
 import { TaskPanel } from "./TaskPanel";
 import { NotificationBell } from "./NotificationBell";
+import { UserMenu } from "./UserMenu";
 import { Avatar } from "./ui";
 
 type Mode = "list" | "board";
@@ -253,6 +254,7 @@ function Header({
           Activity
         </button>
         <NotificationBell />
+        <UserMenu />
       </div>
     </header>
   );
