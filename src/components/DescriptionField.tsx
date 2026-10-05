@@ -71,7 +71,13 @@ export function DescriptionField({ taskId, value }: { taskId: string; value: str
           onBusy={setPlainBusy}
           onSave={(description) => dispatch({ type: "task.update", taskId, patch: { description } })}
         />
-        {!unavailable && realtime !== "live" && <p className="mt-1 text-xs text-zinc-400">Co-editing is reconnecting; changes save when you click away.</p>}
+        {unavailable ? (
+          <p className="mt-1 text-xs text-zinc-400" data-testid="coediting-unavailable">
+            Co-editing isn&apos;t available right now (is the realtime service up to date?); changes save when you click away.
+          </p>
+        ) : (
+          realtime !== "live" && <p className="mt-1 text-xs text-zinc-400">Co-editing is reconnecting; changes save when you click away.</p>
+        )}
       </div>
     );
   }
