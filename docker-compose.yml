@@ -32,5 +32,21 @@ services:
       db: { condition: service_healthy }
       redis: { condition: service_healthy }
 
+  # WebSocket service for presence, cursors, typing and live notifications.
+  # Same image as the app, different entry point. Stateless (all shared state is
+  # in Redis), so it can be scaled with `docker compose up --scale realtime=N`
+  # behind a load balancer.
+  realtime:
+    build: .
+    command: ["npx", "tsx", "realtime/main.ts"]
+    environment:
+      REDIS_URL: redis://redis:6379
+      REALTIME_PORT: "3001"
+      # Pages allowed to connect (the session is a cookie). Unset = any localhost origin.
+      ALLOWED_ORIGINS: http://localhost:3000,http://127.0.0.1:3000
+    ports: ["3001:3001"]
+    depends_on:
+      redis: { condition: service_healthy }
+
 volumes:
   pgdata:

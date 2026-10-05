@@ -1,13 +1,13 @@
 "use client";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { useEffect, useRef } from "react";
-import { useShallow } from "zustand/react/shallow";
 import { useShowTaskUpdates, useTaskFeed } from "@/client/feeds";
 import { ensureTasks, selectTask, useStore } from "@/client/store";
 import { useInfiniteTrigger } from "@/client/useInfiniteTrigger";
 import type { TaskFilter } from "@/contract/filters";
 import { blockingDependencies } from "@/domain/rules";
 import type { Task } from "@/domain/types";
+import { clearCursorOnLeave, cursorHandlers, RemoteCursors, selectionStyle, usePeersOnTask } from "./Collaboration";
 import { UpdatesPill } from "./UpdatesPill";
 import { Avatar, PriorityLabel, StatusBadge, Tag } from "./ui";
 
@@ -51,7 +51,7 @@ export function TaskList({ filter, selectedId }: { filter: TaskFilter; selectedI
       {feed.ids.length === 0 ? (
         <p className="p-6 text-sm text-zinc-500">{feed.isLoading ? "Loading…" : "No tasks match."}</p>
       ) : (
-        <div ref={parentRef} className="min-h-0 flex-1 overflow-auto" data-testid="task-list">
+        <div ref={parentRef} className="min-h-0 flex-1 overflow-auto" data-testid="task-list" {...clearCursorOnLeave}>
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((row) => {
               const id = feed.ids[row.index];
@@ -75,7 +75,7 @@ function TaskRow({ id, selected }: { id: string; selected: boolean }) {
     if (task?.dependencies.length) ensureTasks(task.dependencies);
   }, [task?.dependencies]);
   const blocked = useStore((s) => (s.view && task?.dependencies.length ? blockingDependencies(task, s.view.tasks).length > 0 : false));
-  const viewers = useStore(useShallow((s) => s.presence.filter((p) => p.taskId === id && p.name !== s.me)));
+  const viewers = usePeersOnTask(id);
   const pending = useStore((s) => s.pending.some((p) => ("taskId" in p.command && p.command.taskId === id) || (p.command.type === "task.create" && p.command.task.id === id)));
   if (!task) return null;
 
@@ -83,14 +83,17 @@ function TaskRow({ id, selected }: { id: string; selected: boolean }) {
     <button
       onClick={() => selectTask(task.id)}
       data-testid="task-row"
-      className={`${COLS} h-full w-full items-center border-b border-zinc-100 px-4 text-left text-sm hover:bg-zinc-50 ${selected ? "bg-sky-50 hover:bg-sky-50" : ""}`}
+      {...cursorHandlers(task.id)}
+      style={selectionStyle(viewers)}
+      className={`${COLS} relative h-full w-full items-center border-b border-zinc-100 px-4 text-left text-sm hover:bg-zinc-50 ${selected ? "bg-sky-50 hover:bg-sky-50" : ""}`}
     >
+      <RemoteCursors taskId={task.id} />
       <span className="flex min-w-0 items-center gap-2">
         <span className={`truncate ${task.status === "done" ? "text-zinc-400 line-through" : ""} ${pending ? "opacity-60" : ""}`}>{task.title}</span>
         {blocked && <span className="shrink-0 rounded bg-rose-50 px-1.5 text-[11px] text-rose-700">blocked</span>}
         {task.commentCount > 0 && <span className="shrink-0 text-xs text-zinc-400">💬 {task.commentCount}</span>}
-        {viewers.map((v) => (
-          <Avatar key={v.name} name={v.name} size="xs" />
+        {[...new Set(viewers.map((v) => v.name))].map((name) => (
+          <Avatar key={name} name={name} size="xs" />
         ))}
       </span>
       <span>

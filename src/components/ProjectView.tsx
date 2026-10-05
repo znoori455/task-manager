@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { call } from "@/client/api";
+import { joinRoom, useRealtime } from "@/client/realtime";
 import { closeProject, dispatch, openProject, redo, selectTask, undo, useStore } from "@/client/store";
 import type { TaskCounts } from "@/contract/api";
 import type { TaskFilter } from "@/contract/filters";
@@ -14,7 +15,8 @@ import { Board } from "./Board";
 import { EditableText } from "./EditableText";
 import { TaskList } from "./TaskList";
 import { TaskPanel } from "./TaskPanel";
-import { Toasts } from "./Toasts";
+import { NotificationBell } from "./NotificationBell";
+import { UserMenu } from "./UserMenu";
 import { Avatar } from "./ui";
 
 type Mode = "list" | "board";
@@ -39,7 +41,12 @@ export function ProjectView({ projectId }: { projectId: string }) {
   const [newTitle, setNewTitle] = useState("");
 
   useEffect(() => {
-    void openProject(projectId);
+    void openProject(projectId).then(() => {
+      // Deep link from a notification: /projects/:id?task=<taskId>
+      const task = new URLSearchParams(location.search).get("task");
+      if (task) selectTask(task);
+    });
+    joinRoom({ projectId });
     return closeProject;
   }, [projectId]);
 
@@ -83,7 +90,6 @@ export function ProjectView({ projectId }: { projectId: string }) {
         <Link className="btn" href="/">
           Back to projects
         </Link>
-        <Toasts />
       </div>
     );
   }
@@ -141,7 +147,6 @@ export function ProjectView({ projectId }: { projectId: string }) {
         {selectedTaskId && <TaskPanel key={selectedTaskId} taskId={selectedTaskId} />}
         {showActivity && <ActivityFeed onClose={() => setShowActivity(false)} />}
       </div>
-      <Toasts />
     </div>
   );
 }
@@ -196,7 +201,8 @@ function Header({
 }) {
   const project = useStore((s) => s.view?.project);
   const connection = useStore((s) => s.connection);
-  const presence = useStore((s) => s.presence);
+  const peers = useRealtime((s) => s.peers);
+  const people = [...new Set(peers.map((p) => p.name))];
   const pendingCount = useStore((s) => s.pending.length);
   const canUndo = useStore((s) => s.undoStack.length > 0);
   const canRedo = useStore((s) => s.redoStack.length > 0);
@@ -226,9 +232,9 @@ function Header({
         </div>
       </div>
 
-      <div className="flex -space-x-1.5" aria-label="People here">
-        {presence.map((u) => (
-          <Avatar key={u.name} name={u.name} ring />
+      <div className="flex -space-x-1.5" aria-label="People here" data-testid="presence">
+        {people.map((name) => (
+          <Avatar key={name} name={name} ring />
         ))}
       </div>
 
@@ -247,6 +253,8 @@ function Header({
         <button className={`btn ${activityOpen ? "bg-zinc-100" : ""}`} onClick={onToggleActivity}>
           Activity
         </button>
+        <NotificationBell />
+        <UserMenu />
       </div>
     </header>
   );

@@ -3,6 +3,8 @@ import { useEffect, useState } from "react";
 import { call } from "@/client/api";
 import { rememberName, rememberedName } from "@/client/cache";
 import { setMe, useStore } from "@/client/store";
+import { RealtimeBridge } from "./RealtimeBridge";
+import { Toasts } from "./Toasts";
 
 /** Asks for a display name once; it identifies the user in comments, presence and the activity feed. */
 export function SessionGate({ children }: { children: React.ReactNode }) {
@@ -22,7 +24,14 @@ export function SessionGate({ children }: { children: React.ReactNode }) {
   }, []);
 
   if (!checked) return null;
-  if (me) return <>{children}</>;
+  if (me)
+    return (
+      <>
+        <RealtimeBridge />
+        {children}
+        <Toasts />
+      </>
+    );
 
   return (
     <div className="flex flex-1 items-center justify-center">

@@ -2,12 +2,17 @@ import type { Priority, TaskStatus } from "@/domain/types";
 import { STATUS_LABELS } from "@/domain/rules";
 
 const AVATAR_COLORS = ["bg-rose-500", "bg-amber-500", "bg-emerald-500", "bg-sky-500", "bg-violet-500", "bg-pink-500", "bg-teal-500", "bg-indigo-500"];
+/** Same hues as AVATAR_COLORS, for inline styles (cursors, selection outlines). */
+const HEX_COLORS = ["#f43f5e", "#f59e0b", "#10b981", "#0ea5e9", "#8b5cf6", "#ec4899", "#14b8a6", "#6366f1"];
 
 function hash(s: string) {
   let h = 0;
   for (const c of s) h = (h * 31 + c.charCodeAt(0)) | 0;
   return Math.abs(h);
 }
+
+/** A stable color per user, shared by their avatar, cursor and selection outline. */
+export const colorFor = (name: string) => HEX_COLORS[hash(name) % HEX_COLORS.length];
 
 export function Avatar({ name, size = "sm", ring }: { name: string; size?: "xs" | "sm"; ring?: boolean }) {
   const dims = size === "xs" ? "h-5 w-5 text-[10px]" : "h-7 w-7 text-xs";

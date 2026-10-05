@@ -3,6 +3,7 @@
 // type-checking on the other.
 import type { DomainEvent } from "@/domain/events";
 import type { Comment, Project, Task, TaskStatus } from "@/domain/types";
+import type { NotificationView } from "./realtime";
 import type { CommandRequest } from "./schemas";
 
 export interface ProjectSummary extends Project {
@@ -12,6 +13,7 @@ export interface ProjectSummary extends Project {
 export interface Api {
   "GET /api/session": { res: { name: string | null } };
   "POST /api/session": { body: { name: string }; res: { name: string } };
+  "DELETE /api/session": { res: { ok: true } };
   "GET /api/projects": { res: { projects: ProjectSummary[]; nextCursor: string | null } };
   "GET /api/projects/changes": { res: ProjectChanges };
   "POST /api/projects": { body: { name: string; description?: string }; res: { project: Project } };
@@ -23,7 +25,8 @@ export interface Api {
   "POST /api/projects/:id/commands": { body: CommandRequest; res: { events: DomainEvent[]; version: number } };
   "GET /api/projects/:id/events": { res: { events: DomainEvent[] } };
   "GET /api/projects/:id/tasks/:taskId/comments": { res: { comments: Comment[] } };
-  "POST /api/projects/:id/presence": { body: { taskId: string | null }; res: { ok: true } };
+  "GET /api/notifications": { res: { notifications: NotificationView[]; unread: number } };
+  "POST /api/notifications/read": { body: { ids?: string[] }; res: { unread: number } };
 }
 
 export interface TaskPage {
@@ -59,10 +62,3 @@ export interface ProjectChanges {
 }
 
 export type ApiResponse<K extends keyof Api> = Api[K]["res"];
-
-export interface PresenceUser {
-  name: string;
-  /** Task the user has open, if any. */
-  taskId: string | null;
-  ts: number;
-}

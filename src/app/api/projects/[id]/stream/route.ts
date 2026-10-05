@@ -8,8 +8,8 @@ import { SSE_HEADERS, projectStream } from "@/server/sse";
  * automatically by EventSource on reconnect) or `?since=`.
  */
 export const GET = handler(async (req: NextRequest, { params }: { params: Promise<{ id: string }> }) => {
-  const user = requireUser(req);
+  requireUser(req);
   const { id } = await params;
   const since = Number(req.headers.get("last-event-id") ?? req.nextUrl.searchParams.get("since") ?? 0) || 0;
-  return new Response(projectStream(id, since, user, req.signal), { headers: SSE_HEADERS });
+  return new Response(projectStream(id, since, req.signal), { headers: SSE_HEADERS });
 });

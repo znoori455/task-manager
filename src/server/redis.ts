@@ -2,13 +2,13 @@
 // each project's most recent events (fast reconnect replay), and rate limiting.
 // Postgres stays the source of truth; losing Redis only degrades latency.
 import Redis from "ioredis";
-import type { PresenceUser } from "@/contract/api";
+import type { NotificationView } from "@/contract/realtime";
 import type { DomainEvent } from "@/domain/events";
 import type { Project } from "@/domain/types";
 
 const url = process.env.REDIS_URL ?? "redis://localhost:6379";
 
-export type ProjectMessage = { kind: "event"; event: DomainEvent } | { kind: "presence"; users: PresenceUser[] };
+export type ProjectMessage = { kind: "event"; event: DomainEvent };
 export type LobbyMessage = { kind: "project.upserted"; project: Project } | { kind: "project.deleted"; projectId: string };
 
 type Listener = (message: string) => void;
@@ -39,6 +39,8 @@ export const redis = r.client;
 export const channels = {
   project: (id: string) => `project:${id}`,
   lobby: "projects",
+  /** Per-user notifications, forwarded to the user's WebSocket connections by the realtime service. */
+  notify: (userKey: string) => `notify:${userKey}`,
 };
 
 /**
@@ -62,7 +64,7 @@ export function subscribe(channel: string, listener: Listener): () => void {
   };
 }
 
-export async function publish(channel: string, message: ProjectMessage | LobbyMessage) {
+export async function publish(channel: string, message: ProjectMessage | LobbyMessage | NotificationView) {
   await redis.publish(channel, JSON.stringify(message));
 }
 
@@ -89,28 +91,6 @@ export async function cachedEventsSince(projectId: string, since: number): Promi
   const out = events.filter((e) => e.seq > since);
   for (let i = 0; i < out.length; i++) if (out[i].seq !== since + 1 + i) return null;
   return out;
-}
-
-// ---------- Presence ----------
-
-const PRESENCE_TTL_MS = 30_000;
-const presenceKey = (projectId: string) => `presence:${projectId}`;
-
-export async function setPresence(projectId: string, user: PresenceUser | { name: string; leave: true }) {
-  const key = presenceKey(projectId);
-  if ("leave" in user) await redis.hdel(key, user.name);
-  else await redis.multi().hset(key, user.name, JSON.stringify(user)).expire(key, 60).exec();
-  const all = await redis.hgetall(key);
-  const now = Date.now();
-  const users: PresenceUser[] = [];
-  const stale: string[] = [];
-  for (const [name, json] of Object.entries(all)) {
-    const u = JSON.parse(json) as PresenceUser;
-    if (now - u.ts > PRESENCE_TTL_MS) stale.push(name);
-    else users.push(u);
-  }
-  if (stale.length) await redis.hdel(key, ...stale);
-  await publish(channels.project(projectId), { kind: "presence", users });
 }
 
 // ---------- Rate limiting (token bucket, atomic in Lua) ----------

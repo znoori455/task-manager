@@ -2,19 +2,20 @@
 import { nanoid } from "nanoid";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useMemo, useState } from "react";
-import { useShallow } from "zustand/react/shallow";
 import type { TaskPatch } from "@/contract/schemas";
 import { call } from "@/client/api";
 import { dispatch, ensureTasks, ingestTasks, selectTask, useStore } from "@/client/store";
 import { matchesFilter } from "@/contract/filters";
 import { STATUS_LABELS, blockingDependencies, canTransition } from "@/domain/rules";
 import { PRIORITIES, TASK_STATUSES, type Comment, type Priority, type Task, type TaskStatus } from "@/domain/types";
+import { sendSelect, sendTyping } from "@/client/realtime";
+import { EditingBy, TypingIndicator, usePeersOnTask } from "./Collaboration";
 import { EditableText } from "./EditableText";
 import { Avatar, StatusBadge, Tag, timeAgo } from "./ui";
 
 export function TaskPanel({ taskId }: { taskId: string }) {
   const task = useStore((s) => s.view?.tasks[taskId]);
-  const viewers = useStore(useShallow((s) => s.presence.filter((p) => p.taskId === taskId && p.name !== s.me).map((p) => p.name)));
+  const viewers = [...new Set(usePeersOnTask(taskId).map((p) => p.name))];
 
   if (!task || task.deletedAt) {
     return (
@@ -58,7 +59,15 @@ export function TaskPanel({ taskId }: { taskId: string }) {
       </div>
 
       <div className="min-h-0 flex-1 space-y-5 overflow-y-auto p-4">
-        <EditableText value={task.title} className="w-full rounded px-1 text-lg font-semibold hover:bg-zinc-50" onCommit={(title) => title.trim() && update({ title: title.trim() })} />
+        <div>
+          <EditingBy taskId={taskId} field="title" />
+          <EditableText
+            value={task.title}
+            className="w-full rounded px-1 text-lg font-semibold hover:bg-zinc-50"
+            onEditing={(on) => sendSelect(taskId, on ? "title" : null)}
+            onCommit={(title) => title.trim() && update({ title: title.trim() })}
+          />
+        </div>
 
         <div className="grid grid-cols-2 gap-3">
           <Field label="Status">
@@ -104,8 +113,14 @@ export function TaskPanel({ taskId }: { taskId: string }) {
           />
         </Field>
 
-        <Field label="Description">
-          <EditableText multiline value={task.configuration.description} placeholder="Add a description…" onCommit={(description) => update({ description })} />
+        <Field label="Description" extra={<EditingBy taskId={taskId} field="description" />}>
+          <EditableText
+            multiline
+            value={task.configuration.description}
+            placeholder="Add a description…"
+            onEditing={(on) => sendSelect(taskId, on ? "description" : null)}
+            onCommit={(description) => update({ description })}
+          />
         </Field>
 
         <Field label="Custom fields">
@@ -124,10 +139,13 @@ export function TaskPanel({ taskId }: { taskId: string }) {
   );
 }
 
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
+function Field({ label, extra, children }: { label: string; extra?: React.ReactNode; children: React.ReactNode }) {
   return (
     <div className="space-y-1.5">
-      <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">{label}</div>
+      <div className="text-xs font-medium uppercase tracking-wide text-zinc-500">
+        {label}
+        {extra}
+      </div>
       {children}
     </div>
   );
@@ -316,15 +334,27 @@ function Comments({ taskId }: { taskId: string }) {
         onSubmit={(e) => {
           e.preventDefault();
           const content = draft.trim();
-          if (content && dispatch({ type: "comment.add", comment: { id: nanoid(12), taskId, content } })) setDraft("");
+          if (content && dispatch({ type: "comment.add", comment: { id: nanoid(12), taskId, content } })) {
+            setDraft("");
+            sendTyping(taskId, false);
+          }
         }}
       >
+        <TypingIndicator taskId={taskId} />
         <textarea
           className="input w-full"
           rows={2}
           placeholder="Write a comment… use @name to mention"
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onFocus={() => sendSelect(taskId, "comment")}
+          onBlur={() => {
+            sendSelect(taskId, null);
+            sendTyping(taskId, false);
+          }}
+          onChange={(e) => {
+            setDraft(e.target.value);
+            sendTyping(taskId, e.target.value.length > 0);
+          }}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) e.currentTarget.form?.requestSubmit();
           }}

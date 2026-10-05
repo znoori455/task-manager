@@ -9,6 +9,7 @@ import type { TaskFilter } from "@/contract/filters";
 import { STATUS_LABELS, canTransition } from "@/domain/rules";
 import { TASK_STATUSES, type Task, type TaskStatus } from "@/domain/types";
 import { Avatar, PriorityLabel, STATUS_STYLES } from "./ui";
+import { clearCursorOnLeave, cursorHandlers, RemoteCursors, selectionStyle, usePeersOnTask } from "./Collaboration";
 import { UpdatesPill } from "./UpdatesPill";
 
 const CARD_HEIGHT = 84;
@@ -97,7 +98,7 @@ function Column({
             showUpdates();
           }}
         />
-        <div ref={parentRef} className="absolute inset-0 overflow-auto p-2">
+        <div ref={parentRef} className="absolute inset-0 overflow-auto p-2" {...clearCursorOnLeave}>
           <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
             {virtualizer.getVirtualItems().map((row) => {
               const id = feed.ids[row.index];
@@ -117,6 +118,7 @@ function Column({
 function Card({ id, onDragStart }: { id: string; onDragStart: (t: Task | null) => void }) {
   const task: Task | undefined = useStore((s) => s.view?.tasks[id]);
   const selected = useStore((s) => s.selectedTaskId === id);
+  const viewers = usePeersOnTask(id);
   if (!task) return null;
   return (
     <div
@@ -127,8 +129,12 @@ function Card({ id, onDragStart }: { id: string; onDragStart: (t: Task | null) =
       }}
       onDragEnd={() => onDragStart(null)}
       onClick={() => selectTask(task.id)}
-      className={`flex h-full cursor-grab flex-col justify-between rounded-md border bg-white p-2 text-sm shadow-sm hover:border-zinc-400 active:cursor-grabbing ${selected ? "border-sky-400" : "border-zinc-200"}`}
+      data-testid="task-card"
+      {...cursorHandlers(task.id)}
+      style={selectionStyle(viewers)}
+      className={`relative flex h-full cursor-grab flex-col justify-between rounded-md border bg-white p-2 text-sm shadow-sm hover:border-zinc-400 active:cursor-grabbing ${selected ? "border-sky-400" : "border-zinc-200"}`}
     >
+      <RemoteCursors taskId={task.id} />
       <span className="line-clamp-2">{task.title}</span>
       <span className="flex items-center justify-between">
         <PriorityLabel priority={task.configuration.priority} />

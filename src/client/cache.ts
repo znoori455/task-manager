@@ -4,7 +4,7 @@
 //
 // Every access is wrapped: private windows, blocked storage or quota errors
 // just mean "no cache", never a broken page.
-import { del, get, set } from "idb-keyval";
+import { del, get, keys, set } from "idb-keyval";
 import type { ProjectSummary } from "@/contract/api";
 import type { Command } from "@/contract/schemas";
 import type { DomainEvent } from "@/domain/events";
@@ -68,10 +68,32 @@ export const loadProjectsCache = () =>
 
 export const saveProjectsCache = (c: Omit<ProjectsCache, "v">) => safe(() => set(PROJECTS_KEY, { ...c, v: VERSION }), undefined);
 
+/** Unsent edits across cached projects (they'd be sent as whoever is signed in). */
+export const countPendingEdits = (exceptProjectId?: string) =>
+  safe(async () => {
+    let n = 0;
+    for (const key of await keys()) {
+      if (typeof key !== "string" || !key.startsWith("taskflow:project:") || key === (exceptProjectId && projectKey(exceptProjectId))) continue;
+      n += (await get<ProjectCache>(key))?.pending.length ?? 0;
+    }
+    return n;
+  }, 0);
+
+/** Drop unsent edits from every cached project (cached tasks are kept: they aren't per-user). */
+export const discardPendingEdits = () =>
+  safe(async () => {
+    for (const key of await keys()) {
+      if (typeof key !== "string" || !key.startsWith("taskflow:project:")) continue;
+      const c = await get<ProjectCache>(key);
+      if (c?.pending.length) await set(key, { ...c, pending: [] });
+    }
+  }, undefined);
+
 /** The display name, so the app can start while the server is unreachable. */
 export function rememberName(name: string | null) {
   try {
     if (name) localStorage.setItem("taskflow:me", name);
+    else localStorage.removeItem("taskflow:me");
   } catch {}
 }
 
