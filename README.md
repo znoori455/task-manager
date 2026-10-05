@@ -486,7 +486,6 @@ What's built (one region, N stateless app instances) and the next steps:
 Requirements: Node 24, Docker.
 
 ```bash
-cp .env.example .env
 docker compose up -d db redis
 npm install
 npm run db:migrate
@@ -494,6 +493,10 @@ npm run db:seed        # optional
 npm run dev            # http://localhost:3000
 npm run realtime       # WebSocket service on :3001 (separate terminal)
 ```
+
+No `.env` file is needed: every setting defaults to the `db` and `redis`
+containers above. To point at other servers, set `DATABASE_URL` / `REDIS_URL`
+(see `.env.example`).
 
 | Command | |
 | --- | --- |
